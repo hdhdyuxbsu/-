@@ -5,231 +5,288 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>智慧农业云监测平台</title>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700;800&display=swap');
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
-  --bg:#05080f;--card:rgba(255,255,255,.03);--card-b:rgba(255,255,255,.06);
-  --t1:#eef2ff;--t2:rgba(255,255,255,.5);--t3:rgba(255,255,255,.25);
-  --green:#00d97e;--blue:#3b82f6;--orange:#f59e0b;--red:#ef4444;
-  --purple:#a855f7;--cyan:#06b6d4;--pink:#ec4899;--indigo:#6366f1;
+  --bg:#eef6ee;--card:#ffffff;--card-b:rgba(76,175,80,.18);
+  --t1:#1b5e20;--t2:#33691e;--t3:#689f63;
+  --green:#43a047;--green-l:#66bb6a;--green-d:#2e7d32;
+  --gold:#f9a825;--orange:#ef6c00;--brown:#6d4c41;
+  --blue:#039be5;--red:#e53935;--cyan:#00acc1;
+  --leaf:#81c784;--shadow:rgba(76,175,80,.08);
 }
-body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t1);min-height:100vh;overflow-x:hidden}
+body{font-family:'Noto Sans SC','Microsoft YaHei',system-ui,sans-serif;background:var(--bg);color:var(--t1);min-height:100vh;overflow-x:hidden}
 body::before{content:'';position:fixed;inset:0;
-  background:radial-gradient(ellipse at 20% 0%,rgba(99,102,241,.08) 0%,transparent 50%),
-             radial-gradient(ellipse at 80% 100%,rgba(0,217,126,.05) 0%,transparent 50%),
-             radial-gradient(ellipse at 50% 50%,rgba(59,130,246,.03) 0%,transparent 70%);
+  background:radial-gradient(ellipse at 20% 0%,rgba(129,199,132,.15) 0%,transparent 50%),
+             radial-gradient(ellipse at 80% 100%,rgba(249,168,37,.08) 0%,transparent 50%);
   pointer-events:none;z-index:0}
 
 .wrap{position:relative;z-index:1;max-width:1100px;margin:0 auto;padding:20px 16px 40px}
 
-/* Header */
 .hdr{text-align:center;padding:40px 20px 10px}
-.hdr .logo{font-size:2.2em;font-weight:800;letter-spacing:-1px;
-  background:linear-gradient(135deg,var(--green),var(--cyan),var(--blue));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.hdr .sub{color:var(--t3);font-size:.82em;margin-top:8px;font-weight:300;letter-spacing:2px;text-transform:uppercase}
-.status-row{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:16px;
-  padding:8px 20px;border-radius:30px;background:var(--card);border:1px solid var(--card-b);display:inline-flex}
-.dot{width:7px;height:7px;border-radius:50%;background:var(--red);flex-shrink:0}
-.dot.on{background:var(--green);box-shadow:0 0 8px var(--green)}
-.stxt{font-size:.72em;color:var(--t2);font-weight:400}
-.cloud-tag{font-size:.6em;padding:2px 8px;border-radius:6px;background:rgba(99,102,241,.15);color:var(--indigo);font-weight:600;margin-left:4px}
+.hdr .logo{font-size:2.2em;font-weight:800;letter-spacing:2px;color:var(--green-d)}
+.hdr .sub{color:var(--t3);font-size:.85em;margin-top:8px;font-weight:400;letter-spacing:4px}
+.status-row{display:inline-flex;align-items:center;gap:10px;margin-top:16px;
+  padding:8px 20px;border-radius:30px;background:var(--card);border:1px solid var(--card-b);box-shadow:0 2px 8px var(--shadow)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--red);flex-shrink:0}
+.dot.on{background:var(--green);box-shadow:0 0 8px rgba(67,160,71,.5)}
+.stxt{font-size:.75em;color:var(--t3);font-weight:500}
+.cloud-tag{font-size:.6em;padding:2px 8px;border-radius:6px;background:rgba(67,160,71,.12);color:var(--green);font-weight:700;margin-left:4px}
+.demo-tag{font-size:.6em;padding:2px 8px;border-radius:6px;background:rgba(249,168,37,.15);color:var(--gold);font-weight:700;margin-left:4px;display:none}
 
-/* Sections */
 .sec{margin-top:28px}
 .sec-row{display:flex;align-items:center;gap:10px;margin-bottom:14px}
-.badge{padding:4px 12px;border-radius:8px;font-size:.65em;font-weight:700;letter-spacing:1px}
-.b-env{background:rgba(59,130,246,.1);color:var(--blue)}
-.b-soil{background:rgba(0,217,126,.1);color:var(--green)}
-.b-npk{background:rgba(245,158,11,.1);color:var(--orange)}
-.b-chart{background:rgba(168,85,247,.1);color:var(--purple)}
-.sec-label{font-size:.8em;color:var(--t3);font-weight:500}
+.badge{padding:5px 14px;border-radius:8px;font-size:.7em;font-weight:700;letter-spacing:1px}
+.b-env{background:rgba(3,155,229,.1);color:var(--blue)}
+.b-soil{background:rgba(67,160,71,.1);color:var(--green)}
+.b-npk{background:rgba(249,168,37,.12);color:var(--gold)}
+.b-chart{background:rgba(67,160,71,.1);color:var(--green-d)}
+.sec-label{font-size:.85em;color:var(--t3);font-weight:500}
 
-/* Cards Grid */
-.g{display:grid;gap:10px}
+.g{display:grid;gap:12px}
 .g4{grid-template-columns:repeat(4,1fr)}
 .g3{grid-template-columns:repeat(3,1fr)}
 @media(max-width:700px){.g4,.g3{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:400px){.g4,.g3{grid-template-columns:1fr}}
 
 .c{background:var(--card);border:1px solid var(--card-b);border-radius:14px;padding:18px 16px;
-  position:relative;overflow:hidden;transition:all .25s ease}
-.c:hover{background:rgba(255,255,255,.05);transform:translateY(-1px);box-shadow:0 8px 30px rgba(0,0,0,.3)}
+  position:relative;overflow:hidden;transition:all .25s ease;box-shadow:0 2px 8px var(--shadow)}
+.c:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(76,175,80,.12)}
 .c .top{display:flex;align-items:center;justify-content:space-between}
-.c .lbl{font-size:.68em;color:var(--t3);font-weight:500;letter-spacing:.5px;text-transform:uppercase}
-.c .ic{font-size:1.2em;opacity:.3}
+.c .lbl{font-size:.72em;color:var(--t3);font-weight:500;letter-spacing:1px}
+.c .ic{font-size:1.2em;opacity:.4}
 .c .val{font-size:2em;font-weight:700;margin:10px 0 4px;line-height:1}
-.c .unit{font-size:.68em;color:var(--t3);font-weight:400}
-.c .bar{position:absolute;bottom:0;left:0;right:0;height:2px}
-.bar-b{background:linear-gradient(90deg,var(--blue),var(--cyan))}
-.bar-o{background:linear-gradient(90deg,var(--orange),var(--red))}
-.bar-g{background:linear-gradient(90deg,var(--green),var(--cyan))}
-.bar-p{background:linear-gradient(90deg,var(--purple),var(--pink))}
-.bar-i{background:linear-gradient(90deg,var(--indigo),var(--blue))}
+.c .unit{font-size:.72em;color:var(--t3);font-weight:400}
+.c .bar{position:absolute;bottom:0;left:0;right:0;height:3px}
+.bar-b{background:linear-gradient(90deg,#039be5,#00acc1)}
+.bar-o{background:linear-gradient(90deg,#ef6c00,#e53935)}
+.bar-g{background:linear-gradient(90deg,#43a047,#66bb6a)}
+.bar-gold{background:linear-gradient(90deg,#f9a825,#ffca28)}
+.bar-leaf{background:linear-gradient(90deg,#81c784,#00acc1)}
 
-/* Value colors per type */
-.v-warm{color:#fb923c}.v-cool{color:#38bdf8}.v-green{color:#4ade80}.v-purple{color:#c084fc}
-.v-cyan{color:#22d3ee}.v-yellow{color:#facc15}.v-pink{color:#f472b6}
+.v-warm{color:#ef6c00}.v-cool{color:#039be5}.v-green{color:#2e7d32}.v-gold{color:#f57f17}
+.v-cyan{color:#00838f}.v-wheat{color:#f9a825}.v-leaf{color:#43a047}
 
-/* Chart */
 .chart-sec{margin-top:28px}
 .tabs{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
-.tab{padding:7px 18px;border-radius:10px;font-size:.72em;font-weight:500;cursor:pointer;
-  background:var(--card);border:1px solid var(--card-b);color:var(--t3);transition:all .2s}
-.tab:hover{color:var(--t2);background:rgba(255,255,255,.05)}
-.tab.on{background:rgba(99,102,241,.12);border-color:rgba(99,102,241,.25);color:var(--indigo)}
-.ch-box{background:var(--card);border:1px solid var(--card-b);border-radius:14px;padding:20px}
+.tab{padding:7px 18px;border-radius:10px;font-size:.75em;font-weight:500;cursor:pointer;
+  background:var(--card);border:1px solid var(--card-b);color:var(--t3);transition:all .2s;box-shadow:0 1px 4px var(--shadow)}
+.tab:hover{color:var(--green);background:#f1f8e9}
+.tab.on{background:var(--green);border-color:var(--green);color:#fff;box-shadow:0 2px 8px rgba(67,160,71,.3)}
+.ch-box{background:var(--card);border:1px solid var(--card-b);border-radius:14px;padding:20px;box-shadow:0 2px 8px var(--shadow)}
 .ch-box canvas{width:100%!important;height:260px!important}
 
-/* Time label */
 .time-row{display:flex;justify-content:space-between;align-items:center;margin-top:20px;padding:0 2px}
-.time-lbl{font-size:.65em;color:var(--t3)}
+.time-lbl{font-size:.7em;color:var(--t3)}
 
-/* Footer */
 .ftr{text-align:center;margin-top:32px;padding-top:20px;border-top:1px solid var(--card-b)}
-.ftr p{font-size:.65em;color:var(--t3);line-height:2}
+.ftr p{font-size:.7em;color:var(--t3);line-height:2}
 
-/* Loading */
 .loading{position:fixed;inset:0;z-index:999;background:var(--bg);display:flex;align-items:center;justify-content:center;
   flex-direction:column;gap:16px;transition:opacity .5s}
 .loading.hide{opacity:0;pointer-events:none}
 .spinner{width:36px;height:36px;border:3px solid var(--card-b);border-top-color:var(--green);border-radius:50%;animation:spin 1s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-.loading p{font-size:.8em;color:var(--t2)}
+.loading p{font-size:.82em;color:var(--t2)}
 </style>
 </head>
 <body>
 
 <div class="loading" id="loader">
   <div class="spinner"></div>
-  <p>Connecting to OneNet Cloud...</p>
+  <p>&#127793; 正在连接 OneNet 云平台...</p>
 </div>
 
 <div class="wrap">
   <div class="hdr">
-    <div class="logo">Smart Agriculture</div>
-    <div class="sub">Cloud Monitoring Platform</div>
+    <div class="logo">&#127793; 智慧农业监测平台</div>
+    <div class="sub">实时数据 &middot; 云端监控</div>
     <div style="margin-top:16px">
       <span class="status-row">
         <span class="dot" id="dot"></span>
-        <span class="stxt" id="stxt">Connecting...</span>
-        <span class="cloud-tag">CLOUD</span>
+        <span class="stxt" id="stxt">正在连接...</span>
+        <span class="cloud-tag">OneNet</span>
+        <span class="demo-tag" id="demoTag">演示数据</span>
       </span>
     </div>
   </div>
 
   <div class="sec">
-    <div class="sec-row"><span class="badge b-env">ENV</span><span class="sec-label">Environmental Parameters</span></div>
+    <div class="sec-row"><span class="badge b-env">&#127780; 环境</span><span class="sec-label">环境参数</span></div>
     <div class="g g4">
-      <div class="c"><div class="top"><span class="lbl">Light</span><span class="ic">&#9728;</span></div><div class="val v-yellow" id="lux">--</div><div class="unit">lux</div><div class="bar bar-b"></div></div>
-      <div class="c"><div class="top"><span class="lbl">Temperature</span><span class="ic">&#127777;</span></div><div class="val v-warm" id="env_temp">--</div><div class="unit">&#8451;</div><div class="bar bar-o"></div></div>
-      <div class="c"><div class="top"><span class="lbl">Humidity</span><span class="ic">&#128167;</span></div><div class="val v-cool" id="env_humi">--</div><div class="unit">%</div><div class="bar bar-b"></div></div>
-      <div class="c"><div class="top"><span class="lbl">Pressure</span><span class="ic">&#127744;</span></div><div class="val v-purple" id="press">--</div><div class="unit">hPa</div><div class="bar bar-p"></div></div>
+      <div class="c"><div class="top"><span class="lbl">光照强度</span><span class="ic">&#9728;</span></div><div class="val v-wheat" id="lux">--</div><div class="unit">lux</div><div class="bar bar-gold"></div></div>
+      <div class="c"><div class="top"><span class="lbl">环境温度</span><span class="ic">&#127777;</span></div><div class="val v-warm" id="env_temp">--</div><div class="unit">&#8451;</div><div class="bar bar-o"></div></div>
+      <div class="c"><div class="top"><span class="lbl">环境湿度</span><span class="ic">&#128167;</span></div><div class="val v-cool" id="env_humi">--</div><div class="unit">%</div><div class="bar bar-b"></div></div>
+      <div class="c"><div class="top"><span class="lbl">大气气压</span><span class="ic">&#127744;</span></div><div class="val v-leaf" id="press">--</div><div class="unit">hPa</div><div class="bar bar-leaf"></div></div>
     </div>
   </div>
 
   <div class="sec">
-    <div class="sec-row"><span class="badge b-soil">SOIL</span><span class="sec-label">Soil Parameters</span></div>
+    <div class="sec-row"><span class="badge b-soil">&#127807; 土壤</span><span class="sec-label">土壤参数</span></div>
     <div class="g g3">
-      <div class="c"><div class="top"><span class="lbl">Soil Temp</span><span class="ic">&#127777;</span></div><div class="val v-warm" id="soil_temp">--</div><div class="unit">&#8451;</div><div class="bar bar-o"></div></div>
-      <div class="c"><div class="top"><span class="lbl">Soil Moisture</span><span class="ic">&#128167;</span></div><div class="val v-green" id="soil_humi">--</div><div class="unit">%</div><div class="bar bar-g"></div></div>
-      <div class="c"><div class="top"><span class="lbl">pH Level</span><span class="ic">&#129514;</span></div><div class="val v-cyan" id="ph">--</div><div class="unit">pH</div><div class="bar bar-i"></div></div>
+      <div class="c"><div class="top"><span class="lbl">土壤温度</span><span class="ic">&#127777;</span></div><div class="val v-warm" id="soil_temp">--</div><div class="unit">&#8451;</div><div class="bar bar-o"></div></div>
+      <div class="c"><div class="top"><span class="lbl">土壤湿度</span><span class="ic">&#128167;</span></div><div class="val v-green" id="soil_humi">--</div><div class="unit">%</div><div class="bar bar-g"></div></div>
+      <div class="c"><div class="top"><span class="lbl">酸碱度</span><span class="ic">&#129514;</span></div><div class="val v-cyan" id="ph">--</div><div class="unit">pH</div><div class="bar bar-leaf"></div></div>
     </div>
   </div>
 
   <div class="sec">
-    <div class="sec-row"><span class="badge b-npk">NPK</span><span class="sec-label">Soil Nutrients</span></div>
+    <div class="sec-row"><span class="badge b-npk">&#127806; 养分</span><span class="sec-label">土壤养分</span></div>
     <div class="g g3">
-      <div class="c"><div class="top"><span class="lbl">Nitrogen</span><span class="ic">N</span></div><div class="val v-green" id="n">--</div><div class="unit">mg/kg</div><div class="bar bar-g"></div></div>
-      <div class="c"><div class="top"><span class="lbl">Phosphorus</span><span class="ic">P</span></div><div class="val v-cool" id="p">--</div><div class="unit">mg/kg</div><div class="bar bar-b"></div></div>
-      <div class="c"><div class="top"><span class="lbl">Potassium</span><span class="ic">K</span></div><div class="val v-warm" id="k">--</div><div class="unit">mg/kg</div><div class="bar bar-o"></div></div>
+      <div class="c"><div class="top"><span class="lbl">氮含量</span><span class="ic">N</span></div><div class="val v-green" id="n">--</div><div class="unit">mg/kg</div><div class="bar bar-g"></div></div>
+      <div class="c"><div class="top"><span class="lbl">磷含量</span><span class="ic">P</span></div><div class="val v-cool" id="p">--</div><div class="unit">mg/kg</div><div class="bar bar-b"></div></div>
+      <div class="c"><div class="top"><span class="lbl">钾含量</span><span class="ic">K</span></div><div class="val v-gold" id="k">--</div><div class="unit">mg/kg</div><div class="bar bar-gold"></div></div>
     </div>
   </div>
 
   <div class="chart-sec">
-    <div class="sec-row"><span class="badge b-chart">HISTORY</span><span class="sec-label">24h Trend</span></div>
+    <div class="sec-row"><span class="badge b-chart">&#128200; 趋势</span><span class="sec-label">24小时变化趋势</span></div>
     <div class="tabs">
-      <div class="tab on" onclick="swTab(0)">Temperature</div>
-      <div class="tab" onclick="swTab(1)">Humidity</div>
-      <div class="tab" onclick="swTab(2)">Light</div>
-      <div class="tab" onclick="swTab(3)">pH</div>
+      <div class="tab on" onclick="swTab(0)">温度</div>
+      <div class="tab" onclick="swTab(1)">湿度</div>
+      <div class="tab" onclick="swTab(2)">光照</div>
+      <div class="tab" onclick="swTab(3)">酸碱度</div>
     </div>
     <div class="ch-box"><canvas id="chart"></canvas></div>
   </div>
 
   <div class="time-row">
-    <span class="time-lbl" id="update_time">Last update: --</span>
-    <span class="time-lbl">Auto refresh: 10s</span>
+    <span class="time-lbl" id="update_time">最后更新: --</span>
+    <span class="time-lbl">自动刷新: 10秒</span>
   </div>
 
   <div class="ftr">
-    <p>Smart Agriculture IoT &middot; ESP32 + LoRa + OneNet Cloud</p>
-    <p>Data source: China Mobile OneNet IoT Platform</p>
+    <p>&#127793; 智慧农业物联网 &middot; ESP32-S3 + LoRa + OneNet 云平台</p>
+    <p>数据来源：中国移动 OneNet 物联网开放平台</p>
   </div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/crypto-js@4.2.0/crypto-js.min.js"></script>
 <script>
-/* ====== OneNet Config ====== */
 var CFG = {
   pid: 'W9BY3SlO8w',
   dev: 'dachuang',
   key: 'aDFIWDNUeFpLTTdUTzdCS1VzdWlyV3JLS3pnR2tkdVU=',
-  et: '4102444800',
-  ver: '2018-10-31',
-  proxy: 'https://corsproxy.io/?'
+  et: '2057492169',
+  ver: '2018-10-31'
 };
 var API_BASE = 'https://iot-api.heclouds.com';
+/* ====== Cloudflare Worker 代理 ======
+ * 部署方法见 worker.js 文件，部署后把下面的 URL 改成你的 Worker 地址
+ * 格式：https://你的worker名.你的账号.workers.dev
+ */
+var WORKER_URL = 'https://muddy-dream-1b21.202313141300459.workers.dev';
 var token = '';
 var curTab = 0, chart = null, histCache = {};
+var isDemo = false;
 
-/* ====== Token Generation (Web Crypto API) ====== */
+/* ====== Token: Web Crypto (HTTPS) + CryptoJS fallback (file://) ====== */
 function b64dec(s){return Uint8Array.from(atob(s),function(c){return c.charCodeAt(0)});}
 function b64enc(buf){return btoa(String.fromCharCode.apply(null,new Uint8Array(buf)));}
 
 async function genToken(){
   var res = 'products/'+CFG.pid+'/devices/'+CFG.dev;
   var sts = CFG.et+'\nsha256\n'+res+'\n'+CFG.ver;
-  var keyRaw = b64dec(CFG.key);
-  var cryptoKey = await crypto.subtle.importKey('raw',keyRaw,{name:'HMAC',hash:'SHA-256'},false,['sign']);
-  var sig = await crypto.subtle.sign('HMAC',cryptoKey,new TextEncoder().encode(sts));
-  var signB64 = b64enc(sig);
-  return 'version='+CFG.ver+'&res='+encodeURIComponent(res)+'&et='+CFG.et+'&method=sha256&sign='+encodeURIComponent(signB64);
+
+  /* 方式1: Web Crypto API (仅HTTPS) */
+  if(window.crypto && window.crypto.subtle){
+    try{
+      var keyBuf = b64dec(CFG.key);
+      var cryptoKey = await crypto.subtle.importKey('raw',keyBuf,{name:'HMAC',hash:'SHA-256'},false,['sign']);
+      var sig = await crypto.subtle.sign('HMAC',cryptoKey,new TextEncoder().encode(sts));
+      var signB64 = b64enc(sig);
+      console.log('Token: Web Crypto API');
+      return 'version='+CFG.ver+'&res='+encodeURIComponent(res)+'&et='+CFG.et+'&method=sha256&sign='+encodeURIComponent(signB64);
+    }catch(e){console.warn('Web Crypto failed:',e);}
+  }
+
+  /* 方式2: CryptoJS (兼容file://本地) */
+  if(window.CryptoJS){
+    var keyWords = CryptoJS.enc.Base64.parse(CFG.key);
+    var hash = CryptoJS.HmacSHA256(sts, keyWords);
+    var signB64 = CryptoJS.enc.Base64.stringify(hash);
+    console.log('Token: CryptoJS fallback');
+    return 'version='+CFG.ver+'&res='+encodeURIComponent(res)+'&et='+CFG.et+'&method=sha256&sign='+encodeURIComponent(signB64);
+  }
+
+  throw new Error('无加密库可用');
 }
 
-/* ====== API Calls ====== */
-function apiUrl(path,params){
+/* ====== API ====== */
+function buildUrl(path,params){
   var url = API_BASE+path+'?product_id='+CFG.pid+'&device_name='+CFG.dev;
   if(params) url += '&'+params;
-  return CFG.proxy+encodeURIComponent(url);
+  return WORKER_URL+'?url='+encodeURIComponent(url);
 }
 
-async function fetchLatest(){
-  var resp = await fetch(apiUrl('/thingmodel/query-device-property'),{
-    headers:{'authorization':token}
-  });
-  var json = await resp.json();
-  return json;
+async function apiFetch(path,params){
+  try{
+    var url = buildUrl(path,params);
+    var ctrl = new AbortController();
+    var tid = setTimeout(function(){ctrl.abort();},8000);
+    var resp = await fetch(url,{headers:{'authorization':token},signal:ctrl.signal});
+    clearTimeout(tid);
+    if(resp.ok){
+      var json = await resp.json();
+      if(json && json.code===0) return json;
+      console.warn('API error:', json);
+    }
+  }catch(e){console.warn('Fetch error:',e);}
+  return null;
 }
 
-async function fetchHistory(identifier){
-  var resp = await fetch(apiUrl('/thingmodel/query-device-property-history','identifier='+identifier),{
-    headers:{'authorization':token}
-  });
-  var json = await resp.json();
-  return json;
+/* ====== 演示模式：API连不上时显示模拟数据 ====== */
+function genDemoData(){
+  isDemo = true;
+  document.getElementById('demoTag').style.display='inline';
+  var d = {};
+  var vals = {lux:12580,env_temp:26.4,env_humi:68,press:1013,soil_temp:22.1,soil_humi:45,ph:6.82,n:35,p:18,k:42};
+  for(var k in vals){
+    /* 每次轻微随机波动 */
+    var base = vals[k];
+    var r = base * (0.95 + Math.random()*0.1);
+    d[k] = {value: k==='n'||k==='p'||k==='k' ? Math.round(r) : parseFloat(r.toFixed(2))};
+  }
+  return {code:0,data:d};
 }
 
-/* ====== UI Update ====== */
+function genDemoHistory(){
+  var now = Date.now();
+  var result = {};
+  var bases = {env_temp:26,soil_temp:22,env_humi:65,soil_humi:45,lux:10000,ph:6.8};
+  for(var key in bases){
+    var pts = [];
+    for(var h=23;h>=0;h--){
+      var t = now - h*3600000;
+      var v = bases[key] + (Math.sin(h/4)*bases[key]*0.08) + (Math.random()-0.5)*bases[key]*0.05;
+      pts.push({time:t,value:parseFloat(v.toFixed(1))});
+    }
+    result[key] = pts;
+  }
+  return result;
+}
+
+/* ====== UI ====== */
 function setVal(id,v){var el=document.getElementById(id);if(el)el.textContent=v;}
 
 function updateUI(data){
   if(!data||!data.data) return;
   var d = data.data;
+  /* OneNet返回数组格式: [{identifier:"lux",value:"38.40"}, ...] 转成对象 */
+  var map = {};
+  if(Array.isArray(d)){
+    for(var i=0;i<d.length;i++){
+      if(d[i].identifier) map[d[i].identifier] = {value: d[i].value};
+    }
+  } else {
+    map = d; /* 演示模式直接是对象格式 */
+  }
   var props = ['lux','env_temp','env_humi','press','soil_temp','soil_humi','ph','n','p','k'];
   for(var i=0;i<props.length;i++){
     var key = props[i];
-    if(d[key] && d[key].value !== undefined){
-      var v = d[key].value;
+    if(map[key] && map[key].value !== undefined){
+      var v = map[key].value;
       if(key==='lux') setVal(key, parseFloat(v).toFixed(1));
       else if(key==='ph') setVal(key, parseFloat(v).toFixed(2));
       else if(key==='n'||key==='p'||key==='k') setVal(key, Math.round(v));
@@ -237,16 +294,16 @@ function updateUI(data){
     }
   }
   document.getElementById('dot').className='dot on';
-  document.getElementById('stxt').textContent='Online';
-  document.getElementById('update_time').textContent='Last update: '+new Date().toLocaleTimeString();
+  document.getElementById('stxt').textContent=isDemo?'演示模式':'在线';
+  document.getElementById('update_time').textContent='最后更新: '+new Date().toLocaleTimeString('zh-CN');
 }
 
 /* ====== Chart ====== */
 var tabCfg = [
-  {ids:['env_temp','soil_temp'],labels:['Env Temp (°C)','Soil Temp (°C)'],colors:['#f59e0b','#ef4444']},
-  {ids:['env_humi','soil_humi'],labels:['Env Humidity (%)','Soil Moisture (%)'],colors:['#3b82f6','#00d97e']},
-  {ids:['lux'],labels:['Light (lx)'],colors:['#06b6d4']},
-  {ids:['ph'],labels:['pH'],colors:['#a855f7']}
+  {ids:['env_temp','soil_temp'],labels:['环境温度 (°C)','土壤温度 (°C)'],colors:['#ef6c00','#e53935']},
+  {ids:['env_humi','soil_humi'],labels:['环境湿度 (%)','土壤湿度 (%)'],colors:['#039be5','#43a047']},
+  {ids:['lux'],labels:['光照强度 (lx)'],colors:['#f9a825']},
+  {ids:['ph'],labels:['酸碱度 pH'],colors:['#00acc1']}
 ];
 
 function fmtHour(ts){var d=new Date(ts);return d.getHours()+':'+('0'+d.getMinutes()).slice(-2);}
@@ -267,7 +324,7 @@ function buildChart(){
       backgroundColor:function(ctx){
         var g=ctx.chart.ctx.createLinearGradient(0,0,0,260);
         var c=cfg.colors[datasets.length-1]||cfg.colors[0];
-        g.addColorStop(0,c+'25');g.addColorStop(1,c+'00');return g;
+        g.addColorStop(0,c+'30');g.addColorStop(1,c+'05');return g;
       },
       fill:true,tension:0.4,borderWidth:2,pointRadius:0,pointHoverRadius:3
     });
@@ -278,10 +335,10 @@ function buildChart(){
     options:{
       animation:{duration:300},responsive:true,maintainAspectRatio:false,
       interaction:{mode:'index',intersect:false},
-      plugins:{legend:{position:'bottom',labels:{color:'rgba(255,255,255,.4)',boxWidth:10,padding:14,font:{size:11,family:'Inter'}}}},
+      plugins:{legend:{position:'bottom',labels:{color:'#689f63',boxWidth:10,padding:14,font:{size:11,family:'Noto Sans SC'}}}},
       scales:{
-        x:{ticks:{maxTicksLimit:8,color:'rgba(255,255,255,.2)',font:{size:10}},grid:{color:'rgba(255,255,255,.03)'},border:{color:'transparent'}},
-        y:{ticks:{color:'rgba(255,255,255,.2)',font:{size:10}},grid:{color:'rgba(255,255,255,.03)'},border:{color:'transparent'}}
+        x:{ticks:{maxTicksLimit:8,color:'#a5d6a7',font:{size:10}},grid:{color:'rgba(76,175,80,.08)'},border:{color:'transparent'}},
+        y:{ticks:{color:'#a5d6a7',font:{size:10}},grid:{color:'rgba(76,175,80,.08)'},border:{color:'transparent'}}
       }
     }
   });
@@ -294,42 +351,69 @@ function swTab(i){
   buildChart();
 }
 
-/* ====== History Fetch ====== */
 async function loadHistory(){
+  if(isDemo){
+    histCache = genDemoHistory();
+    buildChart();
+    return;
+  }
+  var now = Date.now();
+  var start = now - 24*3600*1000; /* 24小时前 */
+  var timeParams = 'start_time='+start+'&end_time='+now+'&limit=200&sort=asc';
   var ids = ['env_temp','soil_temp','env_humi','soil_humi','lux','ph'];
   for(var i=0;i<ids.length;i++){
     try{
-      var resp = await fetchHistory(ids[i]);
-      if(resp && resp.code===0 && resp.data && resp.data.datapoints){
-        histCache[ids[i]] = resp.data.datapoints;
+      var resp = await apiFetch('/thingmodel/query-device-property-history','identifier='+ids[i]+'&'+timeParams);
+      if(resp && resp.data && resp.data.list && resp.data.list.length>0){
+        histCache[ids[i]] = resp.data.list.map(function(p){
+          return {time: p.time, value: parseFloat(p.value)};
+        });
       }
     }catch(e){}
   }
   buildChart();
 }
 
-/* ====== Main Loop ====== */
+/* ====== Main ====== */
 async function init(){
   try{
     token = await genToken();
-    var data = await fetchLatest();
-    updateUI(data);
+    document.getElementById('stxt').textContent='正在获取数据...';
+
+    var data = await apiFetch('/thingmodel/query-device-property');
+    if(data){
+      updateUI(data);
+      document.getElementById('loader').classList.add('hide');
+      await loadHistory();
+    } else {
+      /* API连不上，启用演示模式 */
+      console.log('API不可用，启用演示模式');
+      var demo = genDemoData();
+      updateUI(demo);
+      document.getElementById('loader').classList.add('hide');
+      await loadHistory();
+    }
+  }catch(e){
+    console.error('初始化错误:',e);
+    /* 出错也启用演示模式 */
+    var demo = genDemoData();
+    updateUI(demo);
     document.getElementById('loader').classList.add('hide');
     await loadHistory();
-  }catch(e){
-    document.getElementById('stxt').textContent='Connection failed';
-    document.getElementById('loader').classList.add('hide');
-    console.error('Init error:',e);
   }
 }
 
 async function poll(){
+  if(isDemo){
+    updateUI(genDemoData());
+    return;
+  }
   try{
-    var data = await fetchLatest();
-    updateUI(data);
+    var data = await apiFetch('/thingmodel/query-device-property');
+    if(data) updateUI(data);
   }catch(e){
     document.getElementById('dot').className='dot';
-    document.getElementById('stxt').textContent='Offline';
+    document.getElementById('stxt').textContent='离线';
   }
 }
 
