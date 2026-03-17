@@ -152,7 +152,7 @@ body::before{content:'';position:fixed;inset:0;
 
   <div class="time-row">
     <span class="time-lbl" id="update_time">最后更新: --</span>
-    <span class="time-lbl"><span id="countdown_txt">30</span>秒后刷新</span>
+    <span class="time-lbl"><span id="countdown_txt">10</span>秒后刷新</span>
   </div>
 
   <div class="ftr">
@@ -395,21 +395,21 @@ async function poll(){
   }
 }
 
-var countdown = 30;
+var countdown = 10;
 function updateCountdown(){
   countdown--;
-  if(countdown <= 0) countdown = 30;
+  if(countdown <= 0) countdown = 10;
   var el = document.getElementById('countdown_txt');
   if(el) el.textContent = countdown;
 }
 
 async function autoPoll(){
-  countdown = 30;
+  countdown = 10;
   await poll();
 }
 
 init();
-setInterval(autoPoll, 30000);       /* 每30秒刷新实时数据 */
+setInterval(autoPoll, 10000);       /* 每10秒刷新实时数据 */
 setInterval(updateCountdown, 1000); /* 每秒更新倒计时 */
 setInterval(loadHistory, 300000);   /* 每5分钟刷新历史图表 */
 </script>
