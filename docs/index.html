@@ -390,12 +390,31 @@ async function poll(){
   try{
     var data = await fetchLatest();
     if(data && data.code===0) updateUI(data);
-  }catch(e){}
+  }catch(e){
+    console.warn('poll error:', e);
+  }
+}
+
+var countdown = 30;
+function updateCountdown(){
+  countdown--;
+  if(countdown <= 0) countdown = 30;
+  var el = document.getElementById('update_time');
+  if(el && !isDemo){
+    var now = el.textContent.replace(/ \(\d+s.*/, '');
+    el.textContent = now + ' (' + countdown + 's后刷新)';
+  }
+}
+
+async function autoPoll(){
+  countdown = 30;
+  await poll();
 }
 
 init();
-setInterval(poll, 30000);       /* 每30秒刷新实时数据 */
-setInterval(loadHistory, 300000); /* 每5分钟刷新历史图表 */
+setInterval(autoPoll, 30000);       /* 每30秒刷新实时数据 */
+setInterval(updateCountdown, 1000); /* 每秒更新倒计时 */
+setInterval(loadHistory, 300000);   /* 每5分钟刷新历史图表 */
 </script>
 </body>
 </html>
