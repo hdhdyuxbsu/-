@@ -152,7 +152,7 @@ body::before{content:'';position:fixed;inset:0;
 
   <div class="time-row">
     <span class="time-lbl" id="update_time">最后更新: --</span>
-    <span class="time-lbl">自动刷新: 1分钟</span>
+    <span class="time-lbl">自动刷新: 30秒</span>
   </div>
 
   <div class="ftr">
@@ -166,13 +166,56 @@ body::before{content:'';position:fixed;inset:0;
 var curTab = 0, chart = null, histCache = {};
 var isDemo = false;
 
-/* ====== 从 GitHub Actions 生成的静态文件读取数据（无需代理） ====== */
-async function fetchJSON(url){
+/* ====== OneNet API 直连配置 ====== */
+var ONENET_PRODUCT_ID = 'W9BY3SlO8w';
+var ONENET_DEVICE_NAME = 'dachuang';
+var ONENET_API_BASE = 'https://iot-api.heclouds.com';
+var ONENET_KEY_B64 = 'aDFIWDNUeFpLTTdUTzdCS1VzdWlyV3JLS3pnR2tkdVU=';
+var ONENET_ET = '2057492169';
+
+/* ====== Token 生成 (HMAC-SHA256) ====== */
+async function generateToken(){
+  var res = 'products/' + ONENET_PRODUCT_ID + '/devices/' + ONENET_DEVICE_NAME;
+  var ver = '2018-10-31';
+  var signStr = ONENET_ET + '\n' + 'sha256' + '\n' + res + '\n' + ver;
+
+  var keyBuf = Uint8Array.from(atob(ONENET_KEY_B64), function(c){return c.charCodeAt(0);});
+  var key = await crypto.subtle.importKey('raw', keyBuf, {name:'HMAC',hash:'SHA-256'}, false, ['sign']);
+  var sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(signStr));
+  var signB64 = btoa(String.fromCharCode.apply(null, new Uint8Array(sig)));
+
+  return 'version=' + ver + '&res=' + encodeURIComponent(res) + '&et=' + ONENET_ET + '&method=sha256&sign=' + encodeURIComponent(signB64);
+}
+
+var cachedToken = null;
+async function getToken(){
+  if(!cachedToken) cachedToken = await generateToken();
+  return cachedToken;
+}
+
+/* ====== OneNet API 调用 ====== */
+async function oneNetGet(path){
   try{
-    var resp = await fetch(url+'?t='+Date.now(),{cache:'no-store'});
+    var token = await getToken();
+    var resp = await fetch(ONENET_API_BASE + path, {
+      headers: {'authorization': token},
+      cache: 'no-store'
+    });
     if(resp.ok) return await resp.json();
-  }catch(e){}
+  }catch(e){console.error('OneNet API error:', e);}
   return null;
+}
+
+async function fetchLatest(){
+  return await oneNetGet('/thingmodel/query-device-property?product_id=' + ONENET_PRODUCT_ID + '&device_name=' + ONENET_DEVICE_NAME);
+}
+
+async function fetchHistory(identifier){
+  var end = Date.now();
+  var start = end - 86400000;
+  return await oneNetGet('/thingmodel/query-device-property-history?product_id=' + ONENET_PRODUCT_ID +
+    '&device_name=' + ONENET_DEVICE_NAME + '&identifier=' + identifier +
+    '&start_time=' + start + '&end_time=' + end + '&limit=200&sort=asc');
 }
 
 /* ====== 演示模式 ====== */
@@ -211,7 +254,6 @@ function setVal(id,v){var el=document.getElementById(id);if(el)el.textContent=v;
 function updateUI(data){
   if(!data||!data.data) return;
   var d = data.data;
-  /* OneNet返回数组格式: [{identifier:"lux",value:"38.40"}, ...] 转成对象 */
   var map = {};
   if(Array.isArray(d)){
     for(var i=0;i<d.length;i++){
@@ -233,6 +275,7 @@ function updateUI(data){
   }
   document.getElementById('dot').className='dot on';
   document.getElementById('stxt').textContent=isDemo?'演示模式':'在线';
+  document.getElementById('update_time').textContent='最后更新: '+new Date().toLocaleString('zh-CN');
 }
 
 /* ====== Chart ====== */
@@ -296,7 +339,7 @@ async function loadHistory(){
   }
   var ids = ['env_temp','soil_temp','env_humi','soil_humi','lux','ph'];
   for(var i=0;i<ids.length;i++){
-    var resp = await fetchJSON('data/history_'+ids[i]+'.json');
+    var resp = await fetchHistory(ids[i]);
     if(resp && resp.data && resp.data.list && resp.data.list.length>0){
       histCache[ids[i]] = resp.data.list.map(function(p){
         return {time: p.time, value: parseFloat(p.value)};
@@ -311,28 +354,30 @@ async function init(){
   try{
     document.getElementById('stxt').textContent='正在获取数据...';
 
-    /* 读取 GitHub Actions 生成的静态数据文件 */
-    var data = await fetchJSON('data/latest.json');
+    var data = await fetchLatest();
     if(data && data.code===0){
       updateUI(data);
       document.getElementById('loader').classList.add('hide');
-
-      /* 读取更新时间 */
-      var ts = await fetchJSON('data/timestamp.json');
-      if(ts && ts.time){
-        document.getElementById('update_time').textContent='最后更新: '+new Date(ts.time).toLocaleString('zh-CN');
-      }
-
       await loadHistory();
     } else {
-      console.log('静态数据不可用，启用演示模式');
-      var demo = genDemoData();
-      updateUI(demo);
-      document.getElementById('loader').classList.add('hide');
-      await loadHistory();
+      throw new Error('API returned: ' + JSON.stringify(data));
     }
   }catch(e){
-    console.error('初始化错误:',e);
+    console.error('初始化错误:', e);
+    /* 回退到静态数据 */
+    try{
+      var resp = await fetch('data/latest.json?t='+Date.now(),{cache:'no-store'});
+      if(resp.ok){
+        var data = await resp.json();
+        if(data && data.code===0){
+          updateUI(data);
+          document.getElementById('loader').classList.add('hide');
+          await loadHistory();
+          return;
+        }
+      }
+    }catch(e2){}
+    /* 最终回退到演示模式 */
     var demo = genDemoData();
     updateUI(demo);
     document.getElementById('loader').classList.add('hide');
@@ -342,19 +387,15 @@ async function init(){
 
 async function poll(){
   if(isDemo) return;
-  var data = await fetchJSON('data/latest.json');
-  if(data && data.code===0){
-    updateUI(data);
-    var ts = await fetchJSON('data/timestamp.json');
-    if(ts && ts.time){
-      document.getElementById('update_time').textContent='最后更新: '+new Date(ts.time).toLocaleString('zh-CN');
-    }
-  }
+  try{
+    var data = await fetchLatest();
+    if(data && data.code===0) updateUI(data);
+  }catch(e){}
 }
 
 init();
-setInterval(poll,60000); /* 每1分钟检查一次新数据 */
-setInterval(loadHistory,300000); /* 每5分钟刷新历史图表 */
+setInterval(poll, 30000);       /* 每30秒刷新实时数据 */
+setInterval(loadHistory, 300000); /* 每5分钟刷新历史图表 */
 </script>
 </body>
 </html>
