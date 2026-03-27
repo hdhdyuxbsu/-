@@ -3,415 +3,645 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>智慧农业云监测平台</title>
+<title>智慧农业监测平台</title>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700;800&display=swap');
-*{margin:0;padding:0;box-sizing:border-box}
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700;800&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#eef6ee;--card:#ffffff;--card-b:rgba(76,175,80,.18);
-  --t1:#1b5e20;--t2:#33691e;--t3:#689f63;
-  --green:#43a047;--green-l:#66bb6a;--green-d:#2e7d32;
-  --gold:#f9a825;--orange:#ef6c00;--brown:#6d4c41;
-  --blue:#039be5;--red:#e53935;--cyan:#00acc1;
-  --leaf:#81c784;--shadow:rgba(76,175,80,.08);
+  --bg:#ffffff;
+  --panel:#ffffff;
+  --line:#e7ecef;
+  --line-strong:#d4dde2;
+  --text:#17313b;
+  --muted:#6f8792;
+  --green:#2f9e44;
+  --blue:#1c7ed6;
+  --orange:#f08c00;
+  --red:#e03131;
+  --cyan:#0b7285;
+  --shadow:0 8px 24px rgba(17,24,39,.05);
 }
-body{font-family:'Noto Sans SC','Microsoft YaHei',system-ui,sans-serif;background:var(--bg);color:var(--t1);min-height:100vh;overflow-x:hidden}
-body::before{content:'';position:fixed;inset:0;
-  background:radial-gradient(ellipse at 20% 0%,rgba(129,199,132,.15) 0%,transparent 50%),
-             radial-gradient(ellipse at 80% 100%,rgba(249,168,37,.08) 0%,transparent 50%);
-  pointer-events:none;z-index:0}
-
-.wrap{position:relative;z-index:1;max-width:1100px;margin:0 auto;padding:20px 16px 40px}
-
-.hdr{text-align:center;padding:40px 20px 10px}
-.hdr .logo{font-size:2.2em;font-weight:800;letter-spacing:2px;color:var(--green-d)}
-.hdr .sub{color:var(--t3);font-size:.85em;margin-top:8px;font-weight:400;letter-spacing:4px}
-.status-row{display:inline-flex;align-items:center;gap:10px;margin-top:16px;
-  padding:8px 20px;border-radius:30px;background:var(--card);border:1px solid var(--card-b);box-shadow:0 2px 8px var(--shadow)}
-.dot{width:8px;height:8px;border-radius:50%;background:var(--red);flex-shrink:0}
-.dot.on{background:var(--green);box-shadow:0 0 8px rgba(67,160,71,.5)}
-.stxt{font-size:.75em;color:var(--t3);font-weight:500}
-.cloud-tag{font-size:.6em;padding:2px 8px;border-radius:6px;background:rgba(67,160,71,.12);color:var(--green);font-weight:700;margin-left:4px}
-.demo-tag{font-size:.6em;padding:2px 8px;border-radius:6px;background:rgba(249,168,37,.15);color:var(--gold);font-weight:700;margin-left:4px;display:none}
-
-.sec{margin-top:28px}
-.sec-row{display:flex;align-items:center;gap:10px;margin-bottom:14px}
-.badge{padding:5px 14px;border-radius:8px;font-size:.7em;font-weight:700;letter-spacing:1px}
-.b-env{background:rgba(3,155,229,.1);color:var(--blue)}
-.b-soil{background:rgba(67,160,71,.1);color:var(--green)}
-.b-npk{background:rgba(249,168,37,.12);color:var(--gold)}
-.b-chart{background:rgba(67,160,71,.1);color:var(--green-d)}
-.sec-label{font-size:.85em;color:var(--t3);font-weight:500}
-
-.g{display:grid;gap:12px}
-.g4{grid-template-columns:repeat(4,1fr)}
-.g3{grid-template-columns:repeat(3,1fr)}
-@media(max-width:700px){.g4,.g3{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:400px){.g4,.g3{grid-template-columns:1fr}}
-
-.c{background:var(--card);border:1px solid var(--card-b);border-radius:14px;padding:18px 16px;
-  position:relative;overflow:hidden;transition:all .25s ease;box-shadow:0 2px 8px var(--shadow)}
-.c:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(76,175,80,.12)}
-.c .top{display:flex;align-items:center;justify-content:space-between}
-.c .lbl{font-size:.72em;color:var(--t3);font-weight:500;letter-spacing:1px}
-.c .ic{font-size:1.2em;opacity:.4}
-.c .val{font-size:2em;font-weight:700;margin:10px 0 4px;line-height:1}
-.c .unit{font-size:.72em;color:var(--t3);font-weight:400}
-.c .bar{position:absolute;bottom:0;left:0;right:0;height:3px}
-.bar-b{background:linear-gradient(90deg,#039be5,#00acc1)}
-.bar-o{background:linear-gradient(90deg,#ef6c00,#e53935)}
-.bar-g{background:linear-gradient(90deg,#43a047,#66bb6a)}
-.bar-gold{background:linear-gradient(90deg,#f9a825,#ffca28)}
-.bar-leaf{background:linear-gradient(90deg,#81c784,#00acc1)}
-
-.v-warm{color:#ef6c00}.v-cool{color:#039be5}.v-green{color:#2e7d32}.v-gold{color:#f57f17}
-.v-cyan{color:#00838f}.v-wheat{color:#f9a825}.v-leaf{color:#43a047}
-
-.chart-sec{margin-top:28px}
-.tabs{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
-.tab{padding:7px 18px;border-radius:10px;font-size:.75em;font-weight:500;cursor:pointer;
-  background:var(--card);border:1px solid var(--card-b);color:var(--t3);transition:all .2s;box-shadow:0 1px 4px var(--shadow)}
-.tab:hover{color:var(--green);background:#f1f8e9}
-.tab.on{background:var(--green);border-color:var(--green);color:#fff;box-shadow:0 2px 8px rgba(67,160,71,.3)}
-.ch-box{background:var(--card);border:1px solid var(--card-b);border-radius:14px;padding:20px;box-shadow:0 2px 8px var(--shadow)}
-.ch-box canvas{width:100%!important;height:260px!important}
-
-.time-row{display:flex;justify-content:space-between;align-items:center;margin-top:20px;padding:0 2px}
-.time-lbl{font-size:.7em;color:var(--t3)}
-
-.ftr{text-align:center;margin-top:32px;padding-top:20px;border-top:1px solid var(--card-b)}
-.ftr p{font-size:.7em;color:var(--t3);line-height:2}
-
-.loading{position:fixed;inset:0;z-index:999;background:var(--bg);display:flex;align-items:center;justify-content:center;
-  flex-direction:column;gap:16px;transition:opacity .5s}
-.loading.hide{opacity:0;pointer-events:none}
-.spinner{width:36px;height:36px;border:3px solid var(--card-b);border-top-color:var(--green);border-radius:50%;animation:spin 1s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-.loading p{font-size:.82em;color:var(--t2)}
+body{
+  font-family:'Noto Sans SC','Microsoft YaHei',system-ui,sans-serif;
+  background:var(--bg);
+  color:var(--text);
+  min-height:100vh;
+}
+.page{
+  max-width:1200px;
+  margin:0 auto;
+  padding:28px 16px 40px;
+}
+.hero{
+  text-align:center;
+  padding:18px 0 8px;
+}
+.hero h1{
+  font-size:40px;
+  font-weight:800;
+  letter-spacing:1px;
+  color:#215c34;
+}
+.hero p{
+  margin-top:10px;
+  color:var(--muted);
+  font-size:14px;
+}
+.status{
+  margin:18px auto 0;
+  display:inline-flex;
+  align-items:center;
+  gap:10px;
+  border:1px solid var(--line);
+  border-radius:999px;
+  padding:10px 16px;
+  background:#fff;
+  box-shadow:var(--shadow);
+}
+.dot{
+  width:10px;
+  height:10px;
+  border-radius:50%;
+  background:#c92a2a;
+}
+.dot.on{background:var(--green)}
+.pill{
+  padding:4px 10px;
+  border-radius:999px;
+  background:#f4f7f8;
+  color:#42606b;
+  font-size:12px;
+  font-weight:700;
+}
+.grid{
+  display:grid;
+  gap:14px;
+}
+.grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}
+.grid-3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.grid-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.section{
+  margin-top:26px;
+}
+.section-head{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  margin-bottom:14px;
+}
+.badge{
+  padding:6px 12px;
+  border-radius:999px;
+  font-size:12px;
+  font-weight:700;
+  background:#f3f6f8;
+  color:#37505a;
+}
+.section-title{
+  font-size:24px;
+  font-weight:800;
+}
+.section-sub{
+  color:var(--muted);
+  font-size:14px;
+}
+.card{
+  background:var(--panel);
+  border:1px solid var(--line);
+  border-radius:18px;
+  padding:18px;
+  box-shadow:var(--shadow);
+}
+.metric .name{
+  font-size:14px;
+  color:var(--muted);
+}
+.metric .value{
+  margin-top:14px;
+  font-size:48px;
+  font-weight:800;
+  line-height:1;
+}
+.metric .unit{
+  margin-top:8px;
+  color:var(--muted);
+  font-size:14px;
+}
+.v-green{color:var(--green)}
+.v-blue{color:var(--blue)}
+.v-orange{color:var(--orange)}
+.v-cyan{color:var(--cyan)}
+.panel-title{
+  font-size:16px;
+  font-weight:700;
+  margin-bottom:10px;
+}
+.panel-body{
+  color:#334b55;
+  line-height:1.7;
+  min-height:88px;
+  white-space:pre-wrap;
+}
+.panel-body.empty{
+  color:#8aa0aa;
+}
+.mini-grid{
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:10px;
+}
+.mini{
+  border:1px solid var(--line);
+  border-radius:14px;
+  padding:12px 14px;
+  background:#fcfdfe;
+}
+.mini .k{
+  color:var(--muted);
+  font-size:12px;
+}
+.mini .v{
+  margin-top:8px;
+  font-size:22px;
+  font-weight:800;
+}
+.tabs{
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+  margin-bottom:14px;
+}
+.tab{
+  border:1px solid var(--line-strong);
+  background:#fff;
+  color:#48616c;
+  border-radius:12px;
+  padding:8px 16px;
+  cursor:pointer;
+  font-size:14px;
+  font-weight:700;
+}
+.tab.active{
+  border-color:var(--green);
+  color:#fff;
+  background:var(--green);
+}
+.chart-wrap{
+  height:320px;
+}
+.foot{
+  margin-top:24px;
+  color:var(--muted);
+  font-size:13px;
+  text-align:center;
+  line-height:1.8;
+}
+.loading{
+  position:fixed;
+  inset:0;
+  background:#fff;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  gap:14px;
+  z-index:100;
+  transition:opacity .3s ease;
+}
+.loading.hide{
+  opacity:0;
+  pointer-events:none;
+}
+.spinner{
+  width:34px;
+  height:34px;
+  border-radius:50%;
+  border:3px solid #dbe4e8;
+  border-top-color:var(--green);
+  animation:spin 1s linear infinite;
+}
+@keyframes spin{
+  to{transform:rotate(360deg)}
+}
+@media (max-width:980px){
+  .grid-4,.grid-3,.grid-2,.mini-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media (max-width:640px){
+  .hero h1{font-size:30px}
+  .grid-4,.grid-3,.grid-2,.mini-grid{grid-template-columns:1fr}
+  .metric .value{font-size:40px}
+}
 </style>
 </head>
 <body>
-
 <div class="loading" id="loader">
   <div class="spinner"></div>
-  <p>&#127793; 正在连接 OneNet 云平台...</p>
+  <div>正在连接 OneNet 并加载最新数据...</div>
 </div>
 
-<div class="wrap">
-  <div class="hdr">
-    <div class="logo">&#127793; 智慧农业监测平台</div>
-    <div class="sub">实时数据 &middot; 云端监控</div>
-    <div style="margin-top:16px">
-      <span class="status-row">
-        <span class="dot" id="dot"></span>
-        <span class="stxt" id="stxt">正在连接...</span>
-        <span class="cloud-tag">OneNet</span>
-        <span class="demo-tag" id="demoTag">演示数据</span>
-      </span>
+<div class="page">
+  <header class="hero">
+    <h1>智慧农业监测平台</h1>
+    <p>OneNet 直连监测 · 白底控制台 · 实时状态展示</p>
+    <div class="status">
+      <span class="dot" id="dot"></span>
+      <span id="status_text">正在连接...</span>
+      <span class="pill">OneNet</span>
+      <span class="pill" id="source_text">直连</span>
     </div>
-  </div>
+  </header>
 
-  <div class="sec">
-    <div class="sec-row"><span class="badge b-env">&#127780; 环境</span><span class="sec-label">环境参数</span></div>
-    <div class="g g4">
-      <div class="c"><div class="top"><span class="lbl">光照强度</span><span class="ic">&#9728;</span></div><div class="val v-wheat" id="lux">--</div><div class="unit">lux</div><div class="bar bar-gold"></div></div>
-      <div class="c"><div class="top"><span class="lbl">环境温度</span><span class="ic">&#127777;</span></div><div class="val v-warm" id="env_temp">--</div><div class="unit">&#8451;</div><div class="bar bar-o"></div></div>
-      <div class="c"><div class="top"><span class="lbl">环境湿度</span><span class="ic">&#128167;</span></div><div class="val v-cool" id="env_humi">--</div><div class="unit">%</div><div class="bar bar-b"></div></div>
-      <div class="c"><div class="top"><span class="lbl">大气气压</span><span class="ic">&#127744;</span></div><div class="val v-leaf" id="press">--</div><div class="unit">hPa</div><div class="bar bar-leaf"></div></div>
+  <section class="section">
+    <div class="section-head">
+      <span class="badge">环境</span>
+      <div>
+        <div class="section-title">环境参数</div>
+        <div class="section-sub">展示来自 OneNet 最新物模型属性</div>
+      </div>
     </div>
-  </div>
-
-  <div class="sec">
-    <div class="sec-row"><span class="badge b-soil">&#127807; 土壤</span><span class="sec-label">土壤参数</span></div>
-    <div class="g g3">
-      <div class="c"><div class="top"><span class="lbl">土壤温度</span><span class="ic">&#127777;</span></div><div class="val v-warm" id="soil_temp">--</div><div class="unit">&#8451;</div><div class="bar bar-o"></div></div>
-      <div class="c"><div class="top"><span class="lbl">土壤湿度</span><span class="ic">&#128167;</span></div><div class="val v-green" id="soil_humi">--</div><div class="unit">%</div><div class="bar bar-g"></div></div>
-      <div class="c"><div class="top"><span class="lbl">酸碱度</span><span class="ic">&#129514;</span></div><div class="val v-cyan" id="ph">--</div><div class="unit">pH</div><div class="bar bar-leaf"></div></div>
+    <div class="grid grid-4">
+      <div class="card metric"><div class="name">光照强度</div><div class="value v-orange" id="lux">--</div><div class="unit">lux</div></div>
+      <div class="card metric"><div class="name">环境温度</div><div class="value v-orange" id="env_temp">--</div><div class="unit">℃</div></div>
+      <div class="card metric"><div class="name">环境湿度</div><div class="value v-blue" id="env_humi">--</div><div class="unit">%</div></div>
+      <div class="card metric"><div class="name">大气气压</div><div class="value v-green" id="press">--</div><div class="unit">hPa</div></div>
     </div>
-  </div>
+  </section>
 
-  <div class="sec">
-    <div class="sec-row"><span class="badge b-npk">&#127806; 养分</span><span class="sec-label">土壤养分</span></div>
-    <div class="g g3">
-      <div class="c"><div class="top"><span class="lbl">氮含量</span><span class="ic">N</span></div><div class="val v-green" id="n">--</div><div class="unit">mg/kg</div><div class="bar bar-g"></div></div>
-      <div class="c"><div class="top"><span class="lbl">磷含量</span><span class="ic">P</span></div><div class="val v-cool" id="p">--</div><div class="unit">mg/kg</div><div class="bar bar-b"></div></div>
-      <div class="c"><div class="top"><span class="lbl">钾含量</span><span class="ic">K</span></div><div class="val v-gold" id="k">--</div><div class="unit">mg/kg</div><div class="bar bar-gold"></div></div>
+  <section class="section">
+    <div class="section-head">
+      <span class="badge">土壤</span>
+      <div>
+        <div class="section-title">土壤参数</div>
+        <div class="section-sub">温度、湿度与酸碱度</div>
+      </div>
     </div>
-  </div>
-
-  <div class="chart-sec">
-    <div class="sec-row"><span class="badge b-chart">&#128200; 趋势</span><span class="sec-label">24小时变化趋势</span></div>
-    <div class="tabs">
-      <div class="tab on" onclick="swTab(0)">温度</div>
-      <div class="tab" onclick="swTab(1)">湿度</div>
-      <div class="tab" onclick="swTab(2)">光照</div>
-      <div class="tab" onclick="swTab(3)">酸碱度</div>
+    <div class="grid grid-3">
+      <div class="card metric"><div class="name">土壤温度</div><div class="value v-orange" id="soil_temp">--</div><div class="unit">℃</div></div>
+      <div class="card metric"><div class="name">土壤湿度</div><div class="value v-green" id="soil_humi">--</div><div class="unit">%</div></div>
+      <div class="card metric"><div class="name">酸碱度</div><div class="value v-cyan" id="ph">--</div><div class="unit">pH</div></div>
     </div>
-    <div class="ch-box"><canvas id="chart"></canvas></div>
-  </div>
+  </section>
 
-  <div class="time-row">
-    <span class="time-lbl" id="update_time">最后更新: --</span>
-    <span class="time-lbl"><span id="countdown_txt">10</span>秒后刷新</span>
-  </div>
+  <section class="section">
+    <div class="section-head">
+      <span class="badge">养分</span>
+      <div>
+        <div class="section-title">土壤养分</div>
+        <div class="section-sub">氮磷钾当前值</div>
+      </div>
+    </div>
+    <div class="grid grid-3">
+      <div class="card metric"><div class="name">氮含量</div><div class="value v-green" id="n">--</div><div class="unit">mg/kg</div></div>
+      <div class="card metric"><div class="name">磷含量</div><div class="value v-blue" id="p">--</div><div class="unit">mg/kg</div></div>
+      <div class="card metric"><div class="name">钾含量</div><div class="value v-orange" id="k">--</div><div class="unit">mg/kg</div></div>
+    </div>
+  </section>
 
-  <div class="ftr">
-    <p>&#127793; 智慧农业物联网 &middot; ESP32-S3 + LoRa + OneNet 云平台</p>
-    <p>数据来源：中国移动 OneNet 物联网开放平台</p>
+  <section class="section">
+    <div class="section-head">
+      <span class="badge">诊断</span>
+      <div>
+        <div class="section-title">异常与 AI 信息</div>
+        <div class="section-sub">异常与大模型回复直接读取 ESP32，本页其余监测数据继续使用 OneNet 直连</div>
+      </div>
+    </div>
+    <div class="grid grid-2">
+      <div class="card">
+        <div class="panel-title">检测到的异常</div>
+        <div class="panel-body empty" id="alert_text">正在分析实时环境...</div>
+      </div>
+      <div class="card">
+        <div class="panel-title">大模型回复</div>
+        <div class="panel-body empty" id="ai_reply_text">正在从 ESP32 读取大模型回复...</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head">
+      <span class="badge">状态</span>
+      <div>
+        <div class="section-title">平台状态</div>
+        <div class="section-sub">显示当前模式、执行策略和刷新时间</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="mini-grid">
+        <div class="mini"><div class="k">控制模式</div><div class="v v-green" id="mode_name">--</div></div>
+        <div class="mini"><div class="k">最近策略</div><div class="v v-blue" id="reason_text">--</div></div>
+        <div class="mini"><div class="k">更新时间</div><div class="v v-orange" id="updated_text">--</div></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head">
+      <span class="badge">趋势</span>
+      <div>
+        <div class="section-title">24 小时变化趋势</div>
+        <div class="section-sub">OneNet 属性历史曲线</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="tabs">
+        <button class="tab active" data-tab="0" onclick="switchTab(0)">温度</button>
+        <button class="tab" data-tab="1" onclick="switchTab(1)">湿度</button>
+        <button class="tab" data-tab="2" onclick="switchTab(2)">光照</button>
+        <button class="tab" data-tab="3" onclick="switchTab(3)">酸碱度</button>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="chart"></canvas>
+      </div>
+    </div>
+  </section>
+
+  <div class="foot">
+    <div>数据来源：中国移动 OneNet 物联网平台</div>
+    <div id="last_refresh">最近刷新：--</div>
   </div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <script>
-var curTab = 0, chart = null, histCache = {};
-var isDemo = false;
+const ONENET_PRODUCT_ID = 'W9BY3SlO8w';
+const ONENET_DEVICE_NAME = 'dachuang';
+const ONENET_API_BASE = 'https://iot-api.heclouds.com';
+const ONENET_KEY_B64 = 'aDFIWDNUeFpLTTdUTzdCS1VzdWlyV3JLS3pnR2tkdVU=';
+const ONENET_ET = '2057492169';
 
-/* ====== OneNet API 直连配置 ====== */
-var ONENET_PRODUCT_ID = 'W9BY3SlO8w';
-var ONENET_DEVICE_NAME = 'dachuang';
-var ONENET_API_BASE = 'https://iot-api.heclouds.com';
-var ONENET_KEY_B64 = 'aDFIWDNUeFpLTTdUTzdCS1VzdWlyV3JLS3pnR2tkdVU=';
-var ONENET_ET = '2057492169';
+let cachedToken = null;
+let chart = null;
+let currentTab = 0;
+let historyCache = {};
 
-/* ====== Token 生成 (HMAC-SHA256) ====== */
-async function generateToken(){
-  var res = 'products/' + ONENET_PRODUCT_ID + '/devices/' + ONENET_DEVICE_NAME;
-  var ver = '2018-10-31';
-  var signStr = ONENET_ET + '\n' + 'sha256' + '\n' + res + '\n' + ver;
+const tabConfigs = [
+  { ids: ['env_temp', 'soil_temp'], labels: ['环境温度', '土壤温度'], colors: ['#f08c00', '#e03131'] },
+  { ids: ['env_humi', 'soil_humi'], labels: ['环境湿度', '土壤湿度'], colors: ['#1c7ed6', '#2f9e44'] },
+  { ids: ['lux'], labels: ['光照强度'], colors: ['#f59f00'] },
+  { ids: ['ph'], labels: ['酸碱度'], colors: ['#0b7285'] }
+];
 
-  var keyBuf = Uint8Array.from(atob(ONENET_KEY_B64), function(c){return c.charCodeAt(0);});
-  var key = await crypto.subtle.importKey('raw', keyBuf, {name:'HMAC',hash:'SHA-256'}, false, ['sign']);
-  var sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(signStr));
-  var signB64 = btoa(String.fromCharCode.apply(null, new Uint8Array(sig)));
-
-  return 'version=' + ver + '&res=' + encodeURIComponent(res) + '&et=' + ONENET_ET + '&method=sha256&sign=' + encodeURIComponent(signB64);
+function setText(id, text){
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
 }
 
-var cachedToken = null;
+function setPanelText(id, text, fallback){
+  const el = document.getElementById(id);
+  if (!el) return;
+  const content = text && String(text).trim() ? String(text).trim() : fallback;
+  el.textContent = content;
+  el.className = 'panel-body' + ((content === fallback) ? ' empty' : '');
+}
+
+function toFixedSafe(value, digits){
+  const num = Number(value);
+  return Number.isFinite(num) ? num.toFixed(digits) : '--';
+}
+
+function parseMapFromLatestResponse(resp){
+  const map = {};
+  if (!resp || !resp.data) return map;
+  if (Array.isArray(resp.data)) {
+    resp.data.forEach(function(item){
+      if (item && item.identifier) map[item.identifier] = item.value;
+    });
+  } else {
+    Object.keys(resp.data).forEach(function(key){
+      const item = resp.data[key];
+      map[key] = item && typeof item === 'object' && 'value' in item ? item.value : item;
+    });
+  }
+  return map;
+}
+
+async function generateToken(){
+  const res = 'products/' + ONENET_PRODUCT_ID + '/devices/' + ONENET_DEVICE_NAME;
+  const version = '2018-10-31';
+  const signStr = ONENET_ET + '\nsha256\n' + res + '\n' + version;
+  const keyBuf = Uint8Array.from(atob(ONENET_KEY_B64), function(c){ return c.charCodeAt(0); });
+  const key = await crypto.subtle.importKey('raw', keyBuf, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(signStr));
+  const signB64 = btoa(String.fromCharCode.apply(null, new Uint8Array(sig)));
+  return 'version=' + version + '&res=' + encodeURIComponent(res) + '&et=' + ONENET_ET + '&method=sha256&sign=' + encodeURIComponent(signB64);
+}
+
 async function getToken(){
-  if(!cachedToken) cachedToken = await generateToken();
+  if (!cachedToken) cachedToken = await generateToken();
   return cachedToken;
 }
 
-/* ====== OneNet API 调用 ====== */
 async function oneNetGet(path){
-  try{
-    var token = await getToken();
-    var resp = await fetch(ONENET_API_BASE + path, {
-      headers: {'authorization': token},
-      cache: 'no-store'
-    });
-    if(resp.ok) return await resp.json();
-  }catch(e){console.error('OneNet API error:', e);}
-  return null;
+  const token = await getToken();
+  const resp = await fetch(ONENET_API_BASE + path, {
+    headers: { authorization: token },
+    cache: 'no-store'
+  });
+  if (!resp.ok) {
+    throw new Error('OneNet HTTP ' + resp.status);
+  }
+  return await resp.json();
 }
 
 async function fetchLatest(){
   return await oneNetGet('/thingmodel/query-device-property?product_id=' + ONENET_PRODUCT_ID + '&device_name=' + ONENET_DEVICE_NAME);
 }
 
+async function fetchEsp32Status(){
+  const resp = await fetch('/api/data', { cache: 'no-store' });
+  if (!resp.ok) {
+    throw new Error('ESP32 API HTTP ' + resp.status);
+  }
+  return await resp.json();
+}
+
 async function fetchHistory(identifier){
-  var end = Date.now();
-  var start = end - 86400000;
+  const end = Date.now();
+  const start = end - 24 * 3600 * 1000;
   return await oneNetGet('/thingmodel/query-device-property-history?product_id=' + ONENET_PRODUCT_ID +
-    '&device_name=' + ONENET_DEVICE_NAME + '&identifier=' + identifier +
-    '&start_time=' + start + '&end_time=' + end + '&limit=200&sort=asc');
+    '&device_name=' + ONENET_DEVICE_NAME +
+    '&identifier=' + identifier +
+    '&start_time=' + start +
+    '&end_time=' + end +
+    '&limit=240&sort=asc');
 }
 
-/* ====== 演示模式 ====== */
-function genDemoData(){
-  isDemo = true;
-  document.getElementById('demoTag').style.display='inline';
-  var d = {};
-  var vals = {lux:12580,env_temp:26.4,env_humi:68,press:1013,soil_temp:22.1,soil_humi:45,ph:6.82,n:35,p:18,k:42};
-  for(var k in vals){
-    var base = vals[k];
-    var r = base * (0.95 + Math.random()*0.1);
-    d[k] = {value: k==='n'||k==='p'||k==='k' ? Math.round(r) : parseFloat(r.toFixed(2))};
-  }
-  return {code:0,data:d};
+function buildAlertText(values){
+  const alerts = [];
+  const envTemp = Number(values.env_temp);
+  const envHumi = Number(values.env_humi);
+  const soilTemp = Number(values.soil_temp);
+  const soilHumi = Number(values.soil_humi);
+  const ph = Number(values.ph);
+  const lux = Number(values.lux);
+
+  if (Number.isFinite(envTemp) && envTemp > 40) alerts.push('环境温度过高 ' + envTemp.toFixed(1) + '℃');
+  if (Number.isFinite(envTemp) && envTemp < 2) alerts.push('环境温度过低 ' + envTemp.toFixed(1) + '℃');
+  if (Number.isFinite(envHumi) && envHumi > 95) alerts.push('环境湿度过高 ' + envHumi.toFixed(0) + '%');
+  if (Number.isFinite(envHumi) && envHumi < 20) alerts.push('环境湿度过低 ' + envHumi.toFixed(0) + '%');
+  if (Number.isFinite(soilTemp) && soilTemp > 40) alerts.push('土壤温度过高 ' + soilTemp.toFixed(1) + '℃');
+  if (Number.isFinite(soilHumi) && soilHumi < 15) alerts.push('土壤湿度仅 ' + soilHumi.toFixed(0) + '%，建议浇水');
+  if (Number.isFinite(soilHumi) && soilHumi > 90) alerts.push('土壤湿度过高 ' + soilHumi.toFixed(0) + '%');
+  if (Number.isFinite(ph) && ph < 3.5) alerts.push('土壤 pH ' + ph.toFixed(2) + ' 偏酸');
+  if (Number.isFinite(ph) && ph > 9.0) alerts.push('土壤 pH ' + ph.toFixed(2) + ' 偏碱');
+  if (Number.isFinite(lux) && lux > 120000) alerts.push('光照过强 ' + lux.toFixed(0) + ' lux');
+
+  return alerts.length ? alerts.join('；') : '当前未检测到明显异常';
 }
 
-function genDemoHistory(){
-  var now = Date.now();
-  var result = {};
-  var bases = {env_temp:26,soil_temp:22,env_humi:65,soil_humi:45,lux:10000,ph:6.8};
-  for(var key in bases){
-    var pts = [];
-    for(var h=23;h>=0;h--){
-      var t = now - h*3600000;
-      var v = bases[key] + (Math.sin(h/4)*bases[key]*0.08) + (Math.random()-0.5)*bases[key]*0.05;
-      pts.push({time:t,value:parseFloat(v.toFixed(1))});
-    }
-    result[key] = pts;
-  }
-  return result;
+function updateDashboard(resp, esp32Data){
+  const values = parseMapFromLatestResponse(resp);
+
+  setText('lux', toFixedSafe(values.lux, 1));
+  setText('env_temp', toFixedSafe(values.env_temp, 1));
+  setText('env_humi', toFixedSafe(values.env_humi, 1));
+  setText('press', toFixedSafe(values.press, 1));
+  setText('soil_temp', toFixedSafe(values.soil_temp, 1));
+  setText('soil_humi', toFixedSafe(values.soil_humi, 1));
+  setText('ph', toFixedSafe(values.ph, 2));
+  setText('n', Number.isFinite(Number(values.n)) ? Math.round(Number(values.n)) : '--');
+  setText('p', Number.isFinite(Number(values.p)) ? Math.round(Number(values.p)) : '--');
+  setText('k', Number.isFinite(Number(values.k)) ? Math.round(Number(values.k)) : '--');
+
+  const alertText = esp32Data && typeof esp32Data.alert === 'string' ? esp32Data.alert : buildAlertText(values);
+  const aiReply = esp32Data && typeof esp32Data.ai_reply === 'string' ? esp32Data.ai_reply : '';
+  const mode = esp32Data && typeof esp32Data.mode === 'string' ? esp32Data.mode : '--';
+  const reason = esp32Data && typeof esp32Data.reason === 'string' ? esp32Data.reason : 'ESP32 暂未返回控制策略';
+  const updatedText = esp32Data && typeof esp32Data.updated === 'number' && esp32Data.updated > 0
+    ? new Date(esp32Data.updated * 1000).toLocaleString('zh-CN')
+    : new Date().toLocaleString('zh-CN');
+
+  setPanelText('alert_text', alertText, '当前未检测到明显异常');
+  setPanelText('ai_reply_text', aiReply, 'ESP32 暂未返回大模型回复');
+  setText('mode_name', mode === 'smart' ? '智能' : mode === 'manual' ? '人工' : String(mode));
+  setText('reason_text', String(reason));
+
+  document.getElementById('dot').className = 'dot on';
+  setText('status_text', 'OneNet 在线');
+  setText('updated_text', updatedText);
+  setText('last_refresh', '最近刷新：' + new Date().toLocaleString('zh-CN'));
 }
 
-/* ====== UI ====== */
-function setVal(id,v){var el=document.getElementById(id);if(el)el.textContent=v;}
-
-function updateUI(data){
-  if(!data||!data.data) return;
-  var d = data.data;
-  var map = {};
-  if(Array.isArray(d)){
-    for(var i=0;i<d.length;i++){
-      if(d[i].identifier) map[d[i].identifier] = {value: d[i].value};
-    }
-  } else {
-    map = d;
-  }
-  var props = ['lux','env_temp','env_humi','press','soil_temp','soil_humi','ph','n','p','k'];
-  for(var i=0;i<props.length;i++){
-    var key = props[i];
-    if(map[key] && map[key].value !== undefined){
-      var v = map[key].value;
-      if(key==='lux') setVal(key, parseFloat(v).toFixed(1));
-      else if(key==='ph') setVal(key, parseFloat(v).toFixed(2));
-      else if(key==='n'||key==='p'||key==='k') setVal(key, Math.round(v));
-      else setVal(key, parseFloat(v).toFixed(1));
-    }
-  }
-  document.getElementById('dot').className='dot on';
-  document.getElementById('stxt').textContent=isDemo?'演示模式':'在线';
-  document.getElementById('update_time').textContent='最后更新: '+new Date().toLocaleString('zh-CN');
+function formatLabel(ts){
+  const d = new Date(ts);
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
 }
 
-/* ====== Chart ====== */
-var tabCfg = [
-  {ids:['env_temp','soil_temp'],labels:['环境温度 (°C)','土壤温度 (°C)'],colors:['#ef6c00','#e53935']},
-  {ids:['env_humi','soil_humi'],labels:['环境湿度 (%)','土壤湿度 (%)'],colors:['#039be5','#43a047']},
-  {ids:['lux'],labels:['光照强度 (lx)'],colors:['#f9a825']},
-  {ids:['ph'],labels:['酸碱度 pH'],colors:['#00acc1']}
-];
+function renderChart(){
+  const cfg = tabConfigs[currentTab];
+  const datasets = [];
+  let labels = [];
 
-function fmtHour(ts){var d=new Date(ts);return d.getHours()+':'+('0'+d.getMinutes()).slice(-2);}
-
-function buildChart(){
-  var cfg = tabCfg[curTab];
-  var datasets = [];
-  var labels = [];
-  for(var i=0;i<cfg.ids.length;i++){
-    var id = cfg.ids[i];
-    var hd = histCache[id];
-    if(!hd||!hd.length) continue;
-    if(labels.length===0) labels = hd.map(function(p){return fmtHour(p.time);});
+  cfg.ids.forEach(function(id, index){
+    const list = historyCache[id] || [];
+    if (!list.length) return;
+    if (!labels.length) labels = list.map(function(item){ return formatLabel(item.time); });
     datasets.push({
-      label:cfg.labels[i],
-      data:hd.map(function(p){return p.value;}),
-      borderColor:cfg.colors[i],
-      backgroundColor:function(ctx){
-        var g=ctx.chart.ctx.createLinearGradient(0,0,0,260);
-        var c=cfg.colors[datasets.length-1]||cfg.colors[0];
-        g.addColorStop(0,c+'30');g.addColorStop(1,c+'05');return g;
-      },
-      fill:true,tension:0.4,borderWidth:2,pointRadius:0,pointHoverRadius:3
+      label: cfg.labels[index],
+      data: list.map(function(item){ return item.value; }),
+      borderColor: cfg.colors[index],
+      backgroundColor: cfg.colors[index],
+      pointRadius: 0,
+      pointHoverRadius: 3,
+      borderWidth: 2,
+      tension: 0.25,
+      fill: false
     });
-  }
-  if(chart) chart.destroy();
-  chart = new Chart(document.getElementById('chart'),{
-    type:'line',data:{labels:labels,datasets:datasets},
-    options:{
-      animation:{duration:300},responsive:true,maintainAspectRatio:false,
-      interaction:{mode:'index',intersect:false},
-      plugins:{legend:{position:'bottom',labels:{color:'#689f63',boxWidth:10,padding:14,font:{size:11,family:'Noto Sans SC'}}}},
-      scales:{
-        x:{ticks:{maxTicksLimit:8,color:'#a5d6a7',font:{size:10}},grid:{color:'rgba(76,175,80,.08)'},border:{color:'transparent'}},
-        y:{ticks:{color:'#a5d6a7',font:{size:10}},grid:{color:'rgba(76,175,80,.08)'},border:{color:'transparent'}}
+  });
+
+  if (chart) chart.destroy();
+  chart = new Chart(document.getElementById('chart'), {
+    type: 'line',
+    data: { labels: labels, datasets: datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: {
+            color: '#4d6671',
+            boxWidth: 10,
+            padding: 16,
+            font: { family: 'Noto Sans SC', size: 12 }
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color: '#708892', maxTicksLimit: 8 },
+          grid: { color: '#eef2f4' },
+          border: { color: '#d8e1e6' }
+        },
+        y: {
+          ticks: { color: '#708892' },
+          grid: { color: '#eef2f4' },
+          border: { color: '#d8e1e6' }
+        }
       }
     }
   });
 }
 
-function swTab(i){
-  curTab=i;
-  var tabs=document.querySelectorAll('.tab');
-  for(var j=0;j<tabs.length;j++) tabs[j].className='tab'+(j===i?' on':'');
-  buildChart();
-}
-
 async function loadHistory(){
-  if(isDemo){
-    histCache = genDemoHistory();
-    buildChart();
-    return;
+  const ids = ['env_temp', 'soil_temp', 'env_humi', 'soil_humi', 'lux', 'ph'];
+  for (const id of ids) {
+    const resp = await fetchHistory(id);
+    const list = resp && resp.data && Array.isArray(resp.data.list) ? resp.data.list : [];
+    historyCache[id] = list.map(function(item){
+      return {
+        time: Number(item.time),
+        value: Number(item.value)
+      };
+    });
   }
-  var ids = ['env_temp','soil_temp','env_humi','soil_humi','lux','ph'];
-  for(var i=0;i<ids.length;i++){
-    var resp = await fetchHistory(ids[i]);
-    if(resp && resp.data && resp.data.list && resp.data.list.length>0){
-      histCache[ids[i]] = resp.data.list.map(function(p){
-        return {time: p.time, value: parseFloat(p.value)};
-      });
-    }
-  }
-  buildChart();
+  renderChart();
 }
 
-/* ====== Main ====== */
-async function init(){
-  try{
-    document.getElementById('stxt').textContent='正在获取数据...';
+function switchTab(index){
+  currentTab = index;
+  document.querySelectorAll('.tab').forEach(function(btn, idx){
+    btn.className = 'tab' + (idx === index ? ' active' : '');
+  });
+  renderChart();
+}
 
-    var data = await fetchLatest();
-    if(data && data.code===0){
-      updateUI(data);
-      document.getElementById('loader').classList.add('hide');
-      await loadHistory();
-    } else {
-      throw new Error('API returned: ' + JSON.stringify(data));
+async function refreshAll(){
+  try {
+    const latest = await fetchLatest();
+    if (!latest || latest.code !== 0) throw new Error('OneNet 返回异常');
+    let esp32Data = null;
+    try {
+      esp32Data = await fetchEsp32Status();
+    } catch (espErr) {
+      console.warn('ESP32 API error:', espErr);
     }
-  }catch(e){
-    console.error('初始化错误:', e);
-    /* 回退到静态数据 */
-    try{
-      var resp = await fetch('data/latest.json?t='+Date.now(),{cache:'no-store'});
-      if(resp.ok){
-        var data = await resp.json();
-        if(data && data.code===0){
-          updateUI(data);
-          document.getElementById('loader').classList.add('hide');
-          await loadHistory();
-          return;
-        }
-      }
-    }catch(e2){}
-    /* 最终回退到演示模式 */
-    var demo = genDemoData();
-    updateUI(demo);
+    updateDashboard(latest, esp32Data);
     document.getElementById('loader').classList.add('hide');
+  } catch (err) {
+    document.getElementById('dot').className = 'dot';
+    setText('status_text', 'OneNet 连接失败');
+    setPanelText('alert_text', '', 'OneNet 连接失败，暂时无法读取异常信息');
+    setPanelText('ai_reply_text', '', 'OneNet 连接失败，暂时无法读取 AI 回复');
+    console.error(err);
+  }
+}
+
+async function init(){
+  await refreshAll();
+  try {
     await loadHistory();
+  } catch (err) {
+    console.error('loadHistory failed:', err);
+  } finally {
+    document.getElementById('loader').classList.add('hide');
   }
-}
-
-async function poll(){
-  if(isDemo) return;
-  try{
-    var data = await fetchLatest();
-    if(data && data.code===0) updateUI(data);
-  }catch(e){
-    console.warn('poll error:', e);
-  }
-}
-
-var countdown = 10;
-function updateCountdown(){
-  countdown--;
-  if(countdown <= 0) countdown = 10;
-  var el = document.getElementById('countdown_txt');
-  if(el) el.textContent = countdown;
-}
-
-async function autoPoll(){
-  countdown = 10;
-  await poll();
 }
 
 init();
-setInterval(autoPoll, 10000);       /* 每10秒刷新实时数据 */
-setInterval(updateCountdown, 1000); /* 每秒更新倒计时 */
-setInterval(loadHistory, 300000);   /* 每5分钟刷新历史图表 */
+setInterval(refreshAll, 10000);
+setInterval(loadHistory, 300000);
 </script>
 </body>
 </html>

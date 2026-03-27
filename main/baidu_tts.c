@@ -18,6 +18,10 @@
 
 static const char *TAG = "BaiduTTS";
 
+#define TTS_PCM_TARGET_PEAK 15000
+#define TTS_INPUT_GAIN      0.55f
+#define TTS_DC_BLOCK_R      0.995f
+
 /* TTS请求互斥锁 - 避免并发HTTP/SSL连接导致资源竞争 */
 static SemaphoreHandle_t s_tts_request_mutex = NULL;
 
@@ -29,10 +33,27 @@ static SemaphoreHandle_t s_tts_request_mutex = NULL;
 #define TOKEN_VALID_DURATION (30 * 24 * 3600 - 300)
 
 /* HTTP响应初始缓冲区大小，按需扩容 */
-#define HTTP_RECV_BUFFER_INITIAL_SIZE (128 * 1024)
+#define HTTP_RECV_BUFFER_INITIAL_SIZE (256 * 1024)
 
 /* 前向声明 */
 static esp_err_t baidu_tts_speak_segment(baidu_tts_handle_t *handle, const char *text);
+
+static esp_err_t baidu_tts_speak_segment_with_retry(baidu_tts_handle_t *handle,
+                                                    const char *text,
+                                                    int retry_times)
+{
+    esp_err_t ret = ESP_FAIL;
+    int max_try = (retry_times < 1) ? 1 : retry_times;
+    for (int i = 0; i < max_try; i++) {
+        ret = baidu_tts_speak_segment(handle, text);
+        if (ret == ESP_OK) {
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "TTS segment failed, retry %d/%d", i + 1, max_try);
+        vTaskDelay(pdMS_TO_TICKS(120));
+    }
+    return ret;
+}
 
 /**
  * @brief HTTP事件处理回调（用于接收音频数据）
@@ -42,11 +63,56 @@ typedef struct {
     size_t buffer_capacity;
     size_t data_len;
     bool is_audio;
+    bool truncated;
     max98357a_handle_t *audio_handle;  // 用于流式播放
     bool streaming;  // 是否启用流式播放
     int16_t *stereo_buf;               // 流式播放用的立体声缓冲
     size_t stereo_buf_size;
 } http_audio_context_t;
+
+static size_t wav_find_pcm_data_offset(const uint8_t *buf, size_t len)
+{
+    if (buf == NULL || len < 12) {
+        return 0;
+    }
+
+    // WAV: "RIFF" + size + "WAVE"
+    if (memcmp(buf, "RIFF", 4) != 0 || memcmp(buf + 8, "WAVE", 4) != 0) {
+        return 0;
+    }
+
+    // Scan chunks: [4-byte id][4-byte size][payload...]
+    size_t off = 12;
+    while (off + 8 <= len) {
+        const uint8_t *ck = buf + off;
+        uint32_t ck_size = (uint32_t)ck[4] |
+                           ((uint32_t)ck[5] << 8) |
+                           ((uint32_t)ck[6] << 16) |
+                           ((uint32_t)ck[7] << 24);
+        size_t payload = off + 8;
+        if (payload > len) {
+            return 0;
+        }
+        if (memcmp(ck, "data", 4) == 0) {
+            if (payload <= len) {
+                return payload;
+            }
+            return 0;
+        }
+
+        // Chunk sizes are padded to even.
+        size_t advance = 8 + (size_t)ck_size;
+        if (advance & 1) {
+            advance++;
+        }
+        if (advance == 0) {
+            return 0;
+        }
+        off += advance;
+    }
+
+    return 0;
+}
 
 static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
     http_audio_context_t *ctx = (http_audio_context_t *)evt->user_data;
@@ -71,6 +137,9 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
             if (ctx->data_len + evt->data_len > ctx->buffer_capacity) {
                 size_t needed = ctx->data_len + evt->data_len;
                 size_t new_cap = ctx->buffer_capacity;
+                if (new_cap == 0) {
+                    new_cap = HTTP_RECV_BUFFER_INITIAL_SIZE;
+                }
                 while (new_cap < needed) {
                     new_cap *= 2;
                 }
@@ -86,8 +155,11 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
                     ctx->buffer_capacity = new_cap;
                     ESP_LOGW(TAG, "Audio buffer expanded to %u bytes", (unsigned)new_cap);
                 } else {
-                    ESP_LOGW(TAG, "Buffer overflow, data truncated");
-                    return ESP_OK;
+                    // 不要静默截断，否则会导致“播放不完整”且很难定位。
+                    ctx->truncated = true;
+                    ESP_LOGE(TAG, "Buffer overflow: need=%u cap=%u, aborting TTS download",
+                             (unsigned)needed, (unsigned)ctx->buffer_capacity);
+                    return ESP_FAIL;
                 }
             }
 
@@ -321,6 +393,16 @@ esp_err_t baidu_tts_speak(baidu_tts_handle_t *handle, const char *text) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    // 获取TTS请求锁，避免并发HTTP和并发I2S播放造成爆音
+    if (s_tts_request_mutex != NULL) {
+        if (xSemaphoreTake(s_tts_request_mutex, pdMS_TO_TICKS(60000)) != pdTRUE) {
+            ESP_LOGE(TAG, "Failed to acquire TTS request mutex");
+            return ESP_ERR_TIMEOUT;
+        }
+    }
+
+    esp_err_t final_ret = ESP_OK;
+
     // 百度TTS文本长度限制（UTF-8编码，约500字符）
     const size_t MAX_TEXT_LEN = 400;  // 降低一点，确保安全
     size_t text_len = strlen(text);
@@ -417,9 +499,10 @@ esp_err_t baidu_tts_speak(baidu_tts_handle_t *handle, const char *text) {
                 // 播放这一段
                 segment_count++;
                 ESP_LOGI(TAG, "Playing segment %d (%d bytes): %.40s...", segment_count, seg_len, segment);
-                esp_err_t ret = baidu_tts_speak_segment(handle, segment);
+                esp_err_t ret = baidu_tts_speak_segment_with_retry(handle, segment, 3);
                 if (ret != ESP_OK) {
                     ESP_LOGW(TAG, "Segment %d playback failed: %s", segment_count, esp_err_to_name(ret));
+                    final_ret = ret;
                 }
                 
                 // 段落间短暂停顿
@@ -430,11 +513,18 @@ esp_err_t baidu_tts_speak(baidu_tts_handle_t *handle, const char *text) {
         }
         
         ESP_LOGI(TAG, "Finished playing %d segments", segment_count);
-        return ESP_OK;
+        if (s_tts_request_mutex != NULL) {
+            xSemaphoreGive(s_tts_request_mutex);
+        }
+        return final_ret;
     }
     
     // 文本不长，直接播放
-    return baidu_tts_speak_segment(handle, text);
+    final_ret = baidu_tts_speak_segment_with_retry(handle, text, 3);
+    if (s_tts_request_mutex != NULL) {
+        xSemaphoreGive(s_tts_request_mutex);
+    }
+    return final_ret;
 }
 
 /**
@@ -453,9 +543,8 @@ static esp_err_t baidu_tts_speak_segment(baidu_tts_handle_t *handle, const char 
     size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     ESP_LOGI(TAG, "Free heap before TTS: %lu bytes (PSRAM: %lu bytes)", free_heap, free_psram);
     
-    if (!enable_streaming && free_heap < 600000) {
-        ESP_LOGW(TAG, "Insufficient memory (%lu bytes), need at least 600KB", free_heap);
-        return ESP_ERR_NO_MEM;
+    if (!enable_streaming && free_heap < 220000) {
+        ESP_LOGW(TAG, "Free heap low (%lu bytes), continue and rely on dynamic allocation", free_heap);
     }
     
     // 确保有有效的token
@@ -511,6 +600,7 @@ static esp_err_t baidu_tts_speak_segment(baidu_tts_handle_t *handle, const char 
         .buffer_capacity = buffer_capacity,
         .data_len = 0,
         .is_audio = false,
+        .truncated = false,
         .audio_handle = handle->audio_handle,
         .streaming = enable_streaming,
         .stereo_buf = NULL,
@@ -557,6 +647,13 @@ static esp_err_t baidu_tts_speak_segment(baidu_tts_handle_t *handle, const char 
         return ESP_FAIL;
     }
 
+    if (audio_ctx.truncated) {
+        ESP_LOGE(TAG, "TTS audio download truncated; abort playback");
+        free(audio_ctx.buffer);
+        free(audio_ctx.stereo_buf);
+        return ESP_ERR_NO_MEM;
+    }
+
     if (!audio_ctx.is_audio) {
         ESP_LOGE(TAG, "Response is not audio");
         free(audio_ctx.buffer);
@@ -587,8 +684,31 @@ static esp_err_t baidu_tts_speak_segment(baidu_tts_handle_t *handle, const char 
     // 百度TTS返回的PCM格式：16kHz采样率，16bit，单声道
     // 需要转换为16bit立体声（左右声道相同）供I2S播放
 
-    // 计算样本数（16bit = 2字节）
-    size_t mono_samples = audio_ctx.data_len / 2;
+    // 部分服务器/代理可能返回 WAV 封装（RIFF/WAVE），这里做兼容：跳过到 data chunk
+    size_t pcm_off = wav_find_pcm_data_offset(audio_ctx.buffer, audio_ctx.data_len);
+    const uint8_t *pcm_ptr = audio_ctx.buffer + pcm_off;
+    size_t pcm_len = (pcm_off > 0 && pcm_off < audio_ctx.data_len) ? (audio_ctx.data_len - pcm_off) : audio_ctx.data_len;
+    if (pcm_off > 0) {
+        ESP_LOGW(TAG, "WAV header detected, skip %u bytes, pcm_len=%u",
+                 (unsigned)pcm_off, (unsigned)pcm_len);
+    }
+    if (pcm_len < 4) {
+        ESP_LOGE(TAG, "PCM payload too small (%u bytes)", (unsigned)pcm_len);
+        free(audio_ctx.buffer);
+        free(audio_ctx.stereo_buf);
+        return ESP_FAIL;
+    }
+
+    // I2S 播放端必须与 PCM 采样率一致，否则会造成变速/音调异常且静音清 DMA 的长度计算失真
+    if (handle->audio_handle != NULL) {
+        esp_err_t sr_ret = max98357a_set_sample_rate(handle->audio_handle, 16000);
+        if (sr_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to set I2S sample rate to 16k: %s", esp_err_to_name(sr_ret));
+        }
+    }
+
+    // 计算样本数（16bit = 2字节），丢弃末尾不完整字节
+    size_t mono_samples = (pcm_len / 2);
     size_t stereo_size = mono_samples * 2 * sizeof(int16_t);  // 16bit立体声
 
     ESP_LOGI(TAG, "Converting to 16-bit stereo: %d samples -> %d bytes", mono_samples, stereo_size);
@@ -608,83 +728,40 @@ static esp_err_t baidu_tts_speak_segment(baidu_tts_handle_t *handle, const char 
         ESP_LOGI(TAG, "Stereo buffer allocated in PSRAM");
     }
 
-    // ===== 滑动窗口 AGC（自动增益控制）=====
-    int16_t *mono_data = (int16_t *)audio_buffer;
-
-    // 第一遍：找到峰值振幅
+    // ===== 保守数字增益 + DC阻断 + 限幅（避免削顶爆音）=====
+    int16_t *mono_data = (int16_t *)pcm_ptr;
     int32_t peak = 0;
+    int32_t last_x = 0;
+    int32_t last_y = 0;
     for (size_t i = 0; i < mono_samples; i++) {
-        int32_t abs_val = mono_data[i] >= 0 ? mono_data[i] : -mono_data[i];
+        int32_t raw = mono_data[i];
+        int32_t x = (int32_t)(raw * TTS_INPUT_GAIN);
+        int32_t y = x - last_x + (int32_t)(TTS_DC_BLOCK_R * (float)last_y);
+        last_x = x;
+        last_y = y;
+
+        /* 软限幅：比硬截断更不容易产生刺耳爆音 */
+        if (y > TTS_PCM_TARGET_PEAK) {
+            int32_t over = y - TTS_PCM_TARGET_PEAK;
+            y = TTS_PCM_TARGET_PEAK + over / 8;
+            if (y > 22000) y = 22000;
+        } else if (y < -TTS_PCM_TARGET_PEAK) {
+            int32_t over = (-TTS_PCM_TARGET_PEAK) - y;
+            y = -TTS_PCM_TARGET_PEAK - over / 8;
+            if (y < -22000) y = -22000;
+        }
+
+        int32_t abs_val = (y >= 0) ? y : -y;
         if (abs_val > peak) peak = abs_val;
+
+        stereo_buffer[i * 2] = (int16_t)y;
+        stereo_buffer[i * 2 + 1] = (int16_t)y;
     }
+    ESP_LOGI(TAG, "PCM processed with limiter, peak=%ld", peak);
 
-    // 峰值归一化，让峰值达到满幅
-    float peak_norm = (peak > 0) ? 30000.0f / (float)peak : 1.0f;
-    if (peak_norm > 1.0f) {
-        for (size_t i = 0; i < mono_samples; i++) {
-            int32_t s = (int32_t)(mono_data[i] * peak_norm);
-            if (s > 32767) s = 32767;
-            if (s < -32768) s = -32768;
-            mono_data[i] = (int16_t)s;
-        }
-        ESP_LOGI(TAG, "Peak normalized: gain=%.1fx", peak_norm);
-    }
-
-    // 第二遍：滑动窗口AGC
-    const int win_size = 160;            // 10ms窗口 (16kHz * 0.01s)
-    const float target_rms = 12000.0f;   // 目标RMS（降低以减少杂音风险）
-    const float max_gain = 6.0f;         // 最大增益上限（降低以抑制噪声放大）
-    const float silence_thr = 800.0f;    // 静音阈值（提高以避免放大尾部噪声）
-    float prev_gain = 1.0f;
-    ESP_LOGI(TAG, "PCM peak: %ld, AGC: target_rms=%d, max_gain=%.0f", peak, (int)target_rms, max_gain);
-
-    for (size_t w = 0; w < mono_samples; w += win_size) {
-        size_t end = w + win_size;
-        if (end > mono_samples) end = mono_samples;
-        size_t n = end - w;
-
-        // 计算当前窗口RMS和峰值
-        float sum_sq = 0;
-        int32_t win_peak = 0;
-        for (size_t i = w; i < end; i++) {
-            float s = (float)mono_data[i];
-            sum_sq += s * s;
-            int32_t a = mono_data[i] >= 0 ? mono_data[i] : -mono_data[i];
-            if (a > win_peak) win_peak = a;
-        }
-        float rms = sqrtf(sum_sq / n);
-
-        // 计算增益：提升安静部分，不衰减响亮部分
-        float g = 1.0f;
-        if (rms > silence_thr) {
-            g = target_rms / rms;
-            // 关键：限制增益使窗口峰值不超过32000，避免削波失真
-            if (win_peak > 0) {
-                float peak_limit = 32000.0f / (float)win_peak;
-                if (g > peak_limit) g = peak_limit;
-            }
-            if (g > max_gain) g = max_gain;
-            if (g < 1.0f) g = 1.0f;  // 不衰减
-        }
-
-        // 平滑过渡：线性插值避免咔嗒声
-        float step = (g - prev_gain) / (float)n;
-        float cur_gain = prev_gain;
-
-        for (size_t i = w; i < end; i++) {
-            cur_gain += step;
-            int32_t amplified = (int32_t)(mono_data[i] * cur_gain);
-            if (amplified > 32767) amplified = 32767;
-            if (amplified < -32768) amplified = -32768;
-            stereo_buffer[i * 2] = (int16_t)amplified;
-            stereo_buffer[i * 2 + 1] = (int16_t)amplified;
-        }
-        prev_gain = g;
-    }
-
-    /* 淡入处理：前 20ms 线性从零增加，避免启动爆音 */
+    /* 淡入处理：前 50ms 线性从零增加，进一步抑制启动爆音 */
     {
-        const size_t fade_samples = 320;  /* 20ms @ 16kHz */
+        const size_t fade_samples = 800;  /* 50ms @ 16kHz */
         size_t fade_len = (mono_samples < fade_samples) ? mono_samples : fade_samples;
         for (size_t i = 0; i < fade_len; i++) {
             float factor = (float)i / (float)fade_len;
@@ -693,9 +770,9 @@ static esp_err_t baidu_tts_speak_segment(baidu_tts_handle_t *handle, const char 
         }
     }
 
-    /* 淡出处理：最后 20ms 线性衰减到零，避免截止爆音 */
+    /* 淡出处理：最后 50ms 线性衰减到零，进一步抑制截止爆音 */
     {
-        const size_t fade_samples = 320;  /* 20ms @ 16kHz */
+        const size_t fade_samples = 800;  /* 50ms @ 16kHz */
         size_t fade_start = (mono_samples > fade_samples) ? (mono_samples - fade_samples) : 0;
         size_t fade_len = mono_samples - fade_start;
         for (size_t i = 0; i < fade_len; i++) {
@@ -716,7 +793,10 @@ static esp_err_t baidu_tts_speak_segment(baidu_tts_handle_t *handle, const char 
     /* 播音前写入 80ms 预静音帧，确保 DMA 缓冲区稳定在零后再衔接音频，
      * 消除从空闲到播音切换时的 DMA 边界抖动（爆音根因之一） */
     {
-        const size_t pre_silence_size = 5120;  /* 80ms @ 16kHz stereo 16bit = 5120 bytes */
+        const uint32_t sr = 16000;
+        const uint32_t pre_ms = 200;  // 适当拉长，进一步压制启播爆音
+        size_t pre_silence_size = (size_t)(sr * 4ULL * pre_ms / 1000ULL);
+        pre_silence_size &= ~((size_t)3);  // 对齐到4字节(16bit stereo)
         int16_t *pre_silence = calloc(pre_silence_size / sizeof(int16_t), sizeof(int16_t));
         if (pre_silence != NULL) {
             size_t sw = 0;
@@ -732,8 +812,10 @@ static esp_err_t baidu_tts_speak_segment(baidu_tts_handle_t *handle, const char 
     ESP_LOGI(TAG, "Estimated play time: %lu ms, timeout: %lu ms", play_time_ms, timeout_ms);
     
     size_t total_written = 0;
-    const size_t chunk_size = 8192;  // 每次写入8KB
+    const size_t chunk_size = 4096;  // 每次写入4KB，降低单次阻塞导致的抖动
     const uint8_t *data_ptr = (const uint8_t *)stereo_buffer;
+    int timeout_retry = 0;
+    const int timeout_retry_max = 24;
     
     while (total_written < stereo_size) {
         size_t remaining = stereo_size - total_written;
@@ -741,8 +823,23 @@ static esp_err_t baidu_tts_speak_segment(baidu_tts_handle_t *handle, const char 
         size_t bytes_written = 0;
         
         ret = max98357a_write(handle->audio_handle, data_ptr + total_written,
-                             to_write, &bytes_written, 1000);  // 每块1秒超时
+                     to_write, &bytes_written, 3000);  // 每块3秒超时，降低误超时
         
+        if (ret == ESP_ERR_TIMEOUT) {
+            if (bytes_written > 0) {
+                total_written += bytes_written;
+                timeout_retry = 0;
+                continue;
+            }
+            timeout_retry++;
+            if (timeout_retry <= timeout_retry_max) {
+                vTaskDelay(pdMS_TO_TICKS(20));
+                continue;
+            }
+            ESP_LOGE(TAG, "I2S write timeout repeatedly at %d/%d bytes", total_written, stereo_size);
+            break;
+        }
+
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Write failed at %d/%d bytes: %s",
                      total_written, stereo_size, esp_err_to_name(ret));
@@ -750,6 +847,7 @@ static esp_err_t baidu_tts_speak_segment(baidu_tts_handle_t *handle, const char 
         }
         
         total_written += bytes_written;
+        timeout_retry = 0;
         
         if (bytes_written < to_write) {
             ESP_LOGW(TAG, "Partial write: %d/%d bytes at offset %d",
@@ -761,9 +859,12 @@ static esp_err_t baidu_tts_speak_segment(baidu_tts_handle_t *handle, const char 
         ESP_LOGI(TAG, "Audio playback completed: %d/%d bytes", total_written, stereo_size);
 
         /* 写入静音尾帧清空 DMA 缓冲区，消除播放结束时的杂音 */
-        /* DMA 配置: 8 desc x 480 frames x 4 bytes = 15360 bytes，写入 16KB 静音确保完全清空 */
+        /* 这里按“时间”清空更可靠：写入足够长的静音确保 DMA 完全排空 */
         {
-            const size_t silence_size = 16384;
+            const uint32_t sr = 16000;
+            const uint32_t tail_ms = 900;  // 覆盖较大的 DMA depth，减少尾部爆音/残留
+            size_t silence_size = (size_t)(sr * 4ULL * tail_ms / 1000ULL);
+            silence_size &= ~((size_t)3);
             int16_t *silence = calloc(silence_size / sizeof(int16_t), sizeof(int16_t));
             if (silence != NULL) {
                 size_t sw = 0;
@@ -772,7 +873,7 @@ static esp_err_t baidu_tts_speak_segment(baidu_tts_handle_t *handle, const char 
             }
         }
         /* 等待 I2S DMA 缓冲区排空，保持放大器常开避免 SD_MODE 关断噪声 */
-        vTaskDelay(pdMS_TO_TICKS(600));
+        vTaskDelay(pdMS_TO_TICKS(1000));
     } else {
         ESP_LOGE(TAG, "Audio playback incomplete: %d/%d bytes, error: %s",
                  total_written, stereo_size, esp_err_to_name(ret));

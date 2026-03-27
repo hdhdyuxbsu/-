@@ -91,8 +91,8 @@ esp_err_t max98357a_init(const max98357a_config_t *config, max98357a_handle_t **
     /* 配置I2S标准模式 */
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(config->i2s_port, I2S_ROLE_MASTER);
     chan_cfg.auto_clear = true;  /* 自动清除DMA缓冲区，避免杂音 */
-    chan_cfg.dma_desc_num = 8;   /* DMA描述符数量 */
-    chan_cfg.dma_frame_num = 480; /* 每个DMA缓冲区的帧数，增大减少杂音 */
+    chan_cfg.dma_desc_num = 12;   /* DMA描述符数量，增大可降低下溢概率 */
+    chan_cfg.dma_frame_num = 960; /* 每个DMA缓冲区的帧数，进一步平滑播放 */
     
     ret = i2s_new_channel(&chan_cfg, &dev->tx_handle, NULL);
     if (ret != ESP_OK) {
@@ -191,10 +191,20 @@ esp_err_t max98357a_enable(max98357a_handle_t *handle)
         return ESP_OK;
     }
     
+    /* 先在I2S上预写一小段静音，让数据线稳定为0，再退出关断。
+     * 否则SD_MODE拉高瞬间如果DMA里残留非零样本，容易产生“啪”的爆音。 */
+    if (handle->tx_handle != NULL) {
+        static const int16_t s_zeros[512] = {0}; /* 512 samples -> 2048 bytes stereo16 */
+        size_t written = 0;
+        // 尝试写两次，覆盖更多DMA边界
+        (void)i2s_channel_write(handle->tx_handle, s_zeros, sizeof(s_zeros), &written, pdMS_TO_TICKS(100));
+        (void)i2s_channel_write(handle->tx_handle, s_zeros, sizeof(s_zeros), &written, pdMS_TO_TICKS(100));
+    }
+
     /* 设置SD_MODE为高电平以退出关断模式 */
     if (handle->sd_mode_pin != GPIO_NUM_NC) {
         gpio_set_level(handle->sd_mode_pin, SD_MODE_ENABLE);
-        
+
         /* 等待启动时间(数据手册: 7.5ms典型值) */
         vTaskDelay(pdMS_TO_TICKS(10));
     }

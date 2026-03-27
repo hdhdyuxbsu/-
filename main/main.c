@@ -15,6 +15,7 @@
 #include "lwip/inet.h"
 #include "esp_timer.h"
 #include "mqtt_client.h"
+#include "cJSON.h"
 #include "mbedtls/md.h"
 #include "mbedtls/base64.h"
 
@@ -29,7 +30,7 @@
 #define TAG "A39C_RX"
 
 /* ====== WiFi STA 配置（连接路由器） ====== */
-#define WIFI_STA_SSID      "ESP"
+#define WIFI_STA_SSID      "OPPO"
 #define WIFI_STA_PASS      "123456789"
 #define WIFI_MAX_RETRY     10
 #define WIFI_RECONNECT_INTERVAL_MS  5000  /* 断线重连间隔(毫秒) */
@@ -52,6 +53,13 @@
 #define A39C_MD0_PIN       GPIO_NUM_15   /* 模式选择引脚 MD0 */
 #define A39C_MD1_PIN       GPIO_NUM_14   /* 模式选择引脚 MD1 */
 #define A39C_AUX_PIN       GPIO_NUM_18   /* AUX 状态引脚 */
+/*
+ * A39C 模块模式脚（MD0/MD1）
+ * 根据你提供的数据手册：
+ * - MD0=0, MD1=0：配置状态
+ * - MD0=1, MD1=0：一般工作状态（收发测试）
+ * - MD0=1, MD1=1：休眠/低功耗
+ */
 #define A39C_MD0_LEVEL     1
 #define A39C_MD1_LEVEL     0
 
@@ -75,6 +83,19 @@ typedef struct {
     uint16_t k;
 } sensor_packet_t;
 
+typedef enum {
+    CONTROL_MODE_MANUAL = 0,
+    CONTROL_MODE_SMART = 1,
+} control_mode_t;
+
+typedef struct {
+    uint8_t fan_speed;    /* 0-100 */
+    uint8_t pump_speed;   /* 0-100 */
+    uint8_t servo_angle;  /* 0-180 */
+    uint32_t update_time_s;
+    char reason[96];
+} control_state_t;
+
 static uint32_t ok_count = 0;
 static uint32_t fail_count = 0;
 static uint32_t rx_bytes = 0;
@@ -83,6 +104,94 @@ static uint32_t aux_low_count = 0;
 /* 前置声明：跨模块共享状态 */
 static bool mqtt_connected = false;
 static bool mqtt_pending_send = false;
+
+/* 控制模式与执行器状态 */
+static control_mode_t g_control_mode = CONTROL_MODE_MANUAL;
+static control_state_t g_control_state = {
+    .fan_speed = 0,
+    .pump_speed = 0,
+    .servo_angle = 90,
+    .update_time_s = 0,
+    .reason = "init",
+};
+static volatile bool g_smart_control_force_run = false;
+
+/* 控制命令协议: A5 5A MODE FAN PUMP SERVO_L SERVO_H RSV XOR */
+#define CONTROL_FRAME_HEAD1 0xA5
+#define CONTROL_FRAME_HEAD2 0x5A
+#define CONTROL_FRAME_LEN   9
+
+static uint8_t clamp_u8(int val, int min_v, int max_v)
+{
+    if (val < min_v) return (uint8_t)min_v;
+    if (val > max_v) return (uint8_t)max_v;
+    return (uint8_t)val;
+}
+
+static void json_escape_text(const char *src, char *dst, size_t dst_size)
+{
+    if (!dst || dst_size == 0) {
+        return;
+    }
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+
+    size_t di = 0;
+    for (size_t si = 0; src[si] != '\0' && di + 1 < dst_size; si++) {
+        char c = src[si];
+        if (c == '"' || c == '\\' || c == '\n' || c == '\r' || c == '\t') {
+            if (di + 2 >= dst_size) {
+                break;
+            }
+            dst[di++] = '\\';
+            dst[di++] = (c == '"' || c == '\\') ? c : ' ';
+        } else {
+            dst[di++] = c;
+        }
+    }
+    dst[di] = '\0';
+}
+
+static void send_control_frame_to_stm32(control_mode_t mode, uint8_t fan, uint8_t pump, uint8_t servo)
+{
+    uint8_t frame[CONTROL_FRAME_LEN] = {0};
+    frame[0] = CONTROL_FRAME_HEAD1;
+    frame[1] = CONTROL_FRAME_HEAD2;
+    frame[2] = (mode == CONTROL_MODE_SMART) ? 0x02 : 0x01;
+    frame[3] = fan;
+    frame[4] = pump;
+    frame[5] = (uint8_t)(servo & 0xFF);
+    frame[6] = (uint8_t)((servo >> 8) & 0xFF);
+    frame[7] = 0x00;
+    for (int i = 0; i < CONTROL_FRAME_LEN - 1; i++) {
+        frame[8] ^= frame[i];
+    }
+
+    int written = uart_write_bytes(A39C_UART_NUM, frame, CONTROL_FRAME_LEN);
+    ESP_LOGI(TAG, "下发控制帧 mode=%s fan=%u pump=%u servo=%u bytes=%d",
+             mode == CONTROL_MODE_SMART ? "smart" : "manual",
+             fan, pump, servo, written);
+}
+
+static void apply_control_and_send(control_mode_t mode, int fan_speed, int pump_speed,
+                                   int servo_angle, const char *reason)
+{
+    g_control_state.fan_speed = clamp_u8(fan_speed, 0, 100);
+    g_control_state.pump_speed = clamp_u8(pump_speed, 0, 100);
+    g_control_state.servo_angle = clamp_u8(servo_angle, 0, 180);
+    g_control_state.update_time_s = (uint32_t)(esp_timer_get_time() / 1000000ULL);
+    if (reason && reason[0]) {
+        snprintf(g_control_state.reason, sizeof(g_control_state.reason), "%s", reason);
+    }
+    g_control_mode = mode;
+
+    send_control_frame_to_stm32(g_control_mode,
+                                g_control_state.fan_speed,
+                                g_control_state.pump_speed,
+                                g_control_state.servo_angle);
+}
 
 /* 最新一帧数据（供 HTTP 接口读取） */
 static sensor_packet_t latest_pkt = {0};
@@ -260,26 +369,131 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 
 static esp_err_t api_data_handler(httpd_req_t *req)
 {
-    char buf[320];
+    char buf[420];
+    char reason_esc[192];
+    json_escape_text(g_control_state.reason, reason_esc, sizeof(reason_esc));
     if (has_data) {
         snprintf(buf, sizeof(buf),
             "{\"seq\":%u,\"lux\":%.2f,\"env_temp\":%.1f,\"env_humi\":%.1f,"
             "\"press\":%.1f,\"soil_temp\":%.1f,\"soil_humi\":%.1f,"
             "\"ph\":%.2f,\"n\":%u,\"p\":%u,\"k\":%u,"
-            "\"ok\":%lu,\"fail\":%lu}",
+            "\"ok\":%lu,\"fail\":%lu,"
+            "\"mode\":\"%s\",\"fan\":%u,\"pump\":%u,\"servo\":%u,\"reason\":\"%s\"}",
             latest_pkt.seq, latest_pkt.lux, latest_pkt.env_temp_c, latest_pkt.env_humi_pct,
             latest_pkt.press_kpa, latest_pkt.soil_temp_c, latest_pkt.soil_humi_pct,
             latest_pkt.ph, latest_pkt.n, latest_pkt.p, latest_pkt.k,
-            (unsigned long)ok_count, (unsigned long)fail_count);
+            (unsigned long)ok_count, (unsigned long)fail_count,
+            g_control_mode == CONTROL_MODE_SMART ? "smart" : "manual",
+            g_control_state.fan_speed,
+            g_control_state.pump_speed,
+            g_control_state.servo_angle,
+            reason_esc);
     } else {
         snprintf(buf, sizeof(buf),
             "{\"seq\":0,\"lux\":0,\"env_temp\":0,\"env_humi\":0,"
             "\"press\":0,\"soil_temp\":0,\"soil_humi\":0,"
             "\"ph\":0,\"n\":0,\"p\":0,\"k\":0,"
-            "\"ok\":0,\"fail\":0}");
+            "\"ok\":0,\"fail\":0,"
+            "\"mode\":\"%s\",\"fan\":%u,\"pump\":%u,\"servo\":%u,\"reason\":\"%s\"}",
+            g_control_mode == CONTROL_MODE_SMART ? "smart" : "manual",
+            g_control_state.fan_speed,
+            g_control_state.pump_speed,
+            g_control_state.servo_angle,
+            reason_esc);
     }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, strlen(buf));
+    return ESP_OK;
+}
+
+static esp_err_t api_control_get_handler(httpd_req_t *req)
+{
+    char buf[320];
+    char reason_esc[192];
+    json_escape_text(g_control_state.reason, reason_esc, sizeof(reason_esc));
+    snprintf(buf, sizeof(buf),
+             "{\"mode\":\"%s\",\"fan\":%u,\"pump\":%u,\"servo\":%u,"
+             "\"updated\":%lu,\"reason\":\"%s\"}",
+             g_control_mode == CONTROL_MODE_SMART ? "smart" : "manual",
+             g_control_state.fan_speed,
+             g_control_state.pump_speed,
+             g_control_state.servo_angle,
+             (unsigned long)g_control_state.update_time_s,
+             reason_esc);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, strlen(buf));
+    return ESP_OK;
+}
+
+static esp_err_t api_control_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > 512) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid content len");
+        return ESP_FAIL;
+    }
+
+    char body[520] = {0};
+    int received = httpd_req_recv(req, body, req->content_len);
+    if (received <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+        return ESP_FAIL;
+    }
+    body[received] = '\0';
+
+    cJSON *root = cJSON_Parse(body);
+    if (root == NULL) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "json parse failed");
+        return ESP_FAIL;
+    }
+
+    const cJSON *mode = cJSON_GetObjectItem(root, "mode");
+    if (mode && cJSON_IsString(mode) && mode->valuestring) {
+        if (strcmp(mode->valuestring, "smart") == 0) {
+            g_control_mode = CONTROL_MODE_SMART;
+            snprintf(g_control_state.reason, sizeof(g_control_state.reason), "web set smart");
+            g_smart_control_force_run = true;
+        } else {
+            g_control_mode = CONTROL_MODE_MANUAL;
+            snprintf(g_control_state.reason, sizeof(g_control_state.reason), "web set manual");
+        }
+        g_control_state.update_time_s = (uint32_t)(esp_timer_get_time() / 1000000ULL);
+    }
+
+    if (g_control_mode == CONTROL_MODE_MANUAL) {
+        int fan = g_control_state.fan_speed;
+        int pump = g_control_state.pump_speed;
+        int servo = g_control_state.servo_angle;
+
+        const cJSON *fan_j = cJSON_GetObjectItem(root, "fan");
+        const cJSON *pump_j = cJSON_GetObjectItem(root, "pump");
+        const cJSON *servo_j = cJSON_GetObjectItem(root, "servo");
+
+        if (fan_j && cJSON_IsNumber(fan_j)) fan = fan_j->valueint;
+        if (pump_j && cJSON_IsNumber(pump_j)) pump = pump_j->valueint;
+        if (servo_j && cJSON_IsNumber(servo_j)) servo = servo_j->valueint;
+
+        apply_control_and_send(CONTROL_MODE_MANUAL, fan, pump, servo, "manual web control");
+    } else {
+        send_control_frame_to_stm32(g_control_mode,
+                                    g_control_state.fan_speed,
+                                    g_control_state.pump_speed,
+                                    g_control_state.servo_angle);
+    }
+
+    cJSON_Delete(root);
+
+    char reason_esc[192];
+    json_escape_text(g_control_state.reason, reason_esc, sizeof(reason_esc));
+    char resp[320];
+    snprintf(resp, sizeof(resp),
+             "{\"ok\":true,\"mode\":\"%s\",\"fan\":%u,\"pump\":%u,\"servo\":%u,\"reason\":\"%s\"}",
+             g_control_mode == CONTROL_MODE_SMART ? "smart" : "manual",
+             g_control_state.fan_speed,
+             g_control_state.pump_speed,
+             g_control_state.servo_angle,
+             reason_esc);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, resp, strlen(resp));
     return ESP_OK;
 }
 
@@ -314,7 +528,7 @@ static esp_err_t api_history_handler(httpd_req_t *req)
 static httpd_handle_t start_webserver(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 12;
     httpd_handle_t server = NULL;
 
     if (httpd_start(&server, &config) == ESP_OK) {
@@ -338,6 +552,20 @@ static httpd_handle_t start_webserver(void)
             .handler   = api_history_handler,
         };
         httpd_register_uri_handler(server, &history_uri);
+
+        httpd_uri_t control_get_uri = {
+            .uri       = "/api/control",
+            .method    = HTTP_GET,
+            .handler   = api_control_get_handler,
+        };
+        httpd_register_uri_handler(server, &control_get_uri);
+
+        httpd_uri_t control_post_uri = {
+            .uri       = "/api/control",
+            .method    = HTTP_POST,
+            .handler   = api_control_post_handler,
+        };
+        httpd_register_uri_handler(server, &control_post_uri);
 
         ESP_LOGI(TAG, "HTTP 服务器已启动");
     }
@@ -662,6 +890,9 @@ static void lora_rx_task(void *arg)
                     latest_pkt = pkt;
                     has_data = true;
                     history_push(&pkt);
+                    if (g_control_mode == CONTROL_MODE_SMART) {
+                        g_smart_control_force_run = true;
+                    }
                     /* 实时刷新显示屏 */
                     {
                         display_sensor_data_t dd = {
@@ -695,6 +926,7 @@ static void lora_rx_task(void *arg)
 /* ====== AI 语音播报 ====== */
 static max98357a_handle_t *g_audio_handle = NULL;
 static spark_chat_client_t g_spark = {0};
+static spark_chat_client_t g_smart_ctrl = {0};
 static baidu_tts_handle_t  g_tts = {0};
 
 /* ====== 异常告警阈值（通用基础值，AI会根据品种联网搜索后细化判断） ====== */
@@ -711,6 +943,73 @@ static baidu_tts_handle_t  g_tts = {0};
 
 #define NORMAL_REPORT_INTERVAL_S  300   /* 正常时5分钟播报一次 */
 #define ALERT_REPORT_INTERVAL_S    60   /* 异常时1分钟播报一次 */
+#define SMART_CONTROL_INTERVAL_S   30    /* 智能控制评估周期 */
+
+static bool parse_control_json_from_text(const char *text, int *fan, int *pump, int *servo, char *reason, size_t reason_size)
+{
+    if (!text || !fan || !pump || !servo) {
+        return false;
+    }
+
+    const char *start = strchr(text, '{');
+    const char *end = strrchr(text, '}');
+    if (!start || !end || end <= start) {
+        return false;
+    }
+
+    size_t len = (size_t)(end - start + 1);
+    if (len >= 512) {
+        len = 511;
+    }
+    char json_buf[512];
+    memcpy(json_buf, start, len);
+    json_buf[len] = '\0';
+
+    cJSON *root = cJSON_Parse(json_buf);
+    if (!root) {
+        return false;
+    }
+
+    const cJSON *fan_j = cJSON_GetObjectItem(root, "fan");
+    const cJSON *pump_j = cJSON_GetObjectItem(root, "pump");
+    const cJSON *servo_j = cJSON_GetObjectItem(root, "servo");
+    const cJSON *reason_j = cJSON_GetObjectItem(root, "reason");
+
+    bool ok = fan_j && cJSON_IsNumber(fan_j)
+              && pump_j && cJSON_IsNumber(pump_j)
+              && servo_j && cJSON_IsNumber(servo_j);
+
+    if (ok) {
+        *fan = fan_j->valueint;
+        *pump = pump_j->valueint;
+        *servo = servo_j->valueint;
+        if (reason && reason_size > 0) {
+            if (reason_j && cJSON_IsString(reason_j) && reason_j->valuestring) {
+                snprintf(reason, reason_size, "%s", reason_j->valuestring);
+            } else {
+                snprintf(reason, reason_size, "smart adjust");
+            }
+        }
+    }
+
+    cJSON_Delete(root);
+    return ok;
+}
+
+static void build_smart_control_prompt(char *buf, size_t size)
+{
+    snprintf(buf, size,
+        "你是%s温室控制器。根据当前数据直接给出执行器控制量。"
+        "输出必须是纯JSON，且只有这些字段："
+        "{\"fan\":0-100,\"pump\":0-100,\"servo\":0-180,\"reason\":\"<=20字\"}。"
+        "不要输出markdown和多余文本。"
+        "当前数据: 光照%.0f lx, 环境温度%.1f℃, 环境湿度%.0f%%, 土壤温度%.1f℃, 土壤湿度%.0f%%, pH%.2f, N%u, P%u, K%u。"
+        "控制逻辑示例: 高温或强光可增大风扇并调整舵机遮阳; 土壤偏干提高水泵。",
+        PLANT_SPECIES,
+        latest_pkt.lux, latest_pkt.env_temp_c, latest_pkt.env_humi_pct,
+        latest_pkt.soil_temp_c, latest_pkt.soil_humi_pct, latest_pkt.ph,
+        latest_pkt.n, latest_pkt.p, latest_pkt.k);
+}
 
 /* 检测数据是否异常，返回告警描述(空字符串=正常) */
 static void check_alerts(const sensor_packet_t *pkt, char *alert_buf, size_t buf_size)
@@ -772,7 +1071,7 @@ static void ai_audio_init(void)
     audio_cfg.sd_mode_pin  = AUDIO_SD_MODE_PIN;
     audio_cfg.sample_rate  = 16000;
     audio_cfg.bits_per_sample = I2S_DATA_BIT_WIDTH_16BIT;
-    audio_cfg.gain         = MAX98357A_GAIN_15DB;
+    audio_cfg.gain         = MAX98357A_GAIN_9DB;
     audio_cfg.channel      = MAX98357A_CHANNEL_LEFT;
 
     esp_err_t ret = max98357a_init(&audio_cfg, &g_audio_handle);
@@ -794,6 +1093,14 @@ static void ai_audio_init(void)
         .search_mode = "auto",
     };
     spark_chat_init(&g_spark, &spark_cfg);
+
+    spark_chat_config_t ctrl_cfg = spark_cfg;
+    ctrl_cfg.enable_web_search = false;
+    spark_chat_init(&g_smart_ctrl, &ctrl_cfg);
+    spark_chat_add_message(&g_smart_ctrl, "system",
+        "你是温室执行器控制助手。根据实时环境数据输出JSON控制量。"
+        "禁止解释，禁止多余文本，只能输出JSON。"
+        "fan和pump范围0-100，servo范围0-180。");
 
     /* 动态生成 system prompt：根据 PLANT_SPECIES 让 AI 联网搜索适生条件 */
     char sys_prompt[512];
@@ -861,7 +1168,18 @@ static void ai_report_task(void *arg)
         snprintf(intro, sizeof(intro),
             "%s智慧监测系统已启动，开始为您实时分析环境数据。",
             PLANT_SPECIES);
-        baidu_tts_speak(&g_tts, intro);
+        esp_err_t intro_ret = ESP_FAIL;
+        for (int i = 0; i < 3; i++) {
+            intro_ret = baidu_tts_speak(&g_tts, intro);
+            if (intro_ret == ESP_OK) {
+                break;
+            }
+            ESP_LOGW(TAG, "开场播报失败，重试 %d/3: %s", i + 1, esp_err_to_name(intro_ret));
+            vTaskDelay(pdMS_TO_TICKS(250));
+        }
+        if (intro_ret != ESP_OK) {
+            ESP_LOGE(TAG, "开场播报最终失败: %s", esp_err_to_name(intro_ret));
+        }
     }
 
     /* 等待3秒再开始定时播报（缩短延迟，加速首次检测） */
@@ -947,6 +1265,56 @@ static void ai_report_task(void *arg)
     }
 }
 
+/* 智能模式：根据大模型分析自动调节风扇/水泵/舵机 */
+static void ai_smart_control_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(12000));
+    uint32_t last_run_s = 0;
+
+    while (1) {
+        uint32_t now_s = (uint32_t)(esp_timer_get_time() / 1000000ULL);
+        bool interval_due = (now_s - last_run_s) >= SMART_CONTROL_INTERVAL_S;
+
+        if (!has_data || g_control_mode != CONTROL_MODE_SMART) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        if (!g_smart_control_force_run && !interval_due) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        g_smart_control_force_run = false;
+        last_run_s = now_s;
+
+        char prompt[640];
+        build_smart_control_prompt(prompt, sizeof(prompt));
+
+        spark_chat_add_message(&g_smart_ctrl, "user", prompt);
+        spark_chat_trim_history(&g_smart_ctrl);
+
+        bool ok = spark_chat_request(&g_smart_ctrl);
+        spark_chat_close_connection(&g_smart_ctrl);
+
+        if (!ok) {
+            ESP_LOGW(TAG, "智能控制AI请求失败");
+            vTaskDelay(pdMS_TO_TICKS(SMART_CONTROL_INTERVAL_S * 1000));
+            continue;
+        }
+
+        const char *resp = spark_chat_get_last_response(&g_smart_ctrl);
+        int fan = 0, pump = 0, servo = 90;
+        char reason[96] = "smart adjust";
+
+        if (parse_control_json_from_text(resp, &fan, &pump, &servo, reason, sizeof(reason))) {
+            apply_control_and_send(CONTROL_MODE_SMART, fan, pump, servo, reason);
+            ESP_LOGI(TAG, "智能控制生效 fan=%d pump=%d servo=%d reason=%s", fan, pump, servo, reason);
+        } else {
+            ESP_LOGW(TAG, "智能控制解析失败: %s", resp ? resp : "(null)");
+        }
+    }
+}
+
 void app_main(void)
 {
     /* NVS 初始化（WiFi 需要） */
@@ -987,6 +1355,7 @@ void app_main(void)
     /* 初始化 AI 语音播报并启动任务 */
     ai_audio_init();
     xTaskCreate(ai_report_task, "ai_report", 16384, NULL, 3, NULL);
+    xTaskCreate(ai_smart_control_task, "ai_smart_ctl", 16384, NULL, 3, NULL);
 
     ESP_LOGI(TAG, "============================================");
     ESP_LOGI(TAG, "  智慧农业监测系统已启动");

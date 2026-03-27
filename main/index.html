@@ -71,6 +71,17 @@ body::before{content:'';position:fixed;top:-50%;left:-50%;width:200%;height:200%
 .chart-card{background:var(--card);border:1px solid var(--card-b);border-radius:16px;padding:20px}
 .chart-card canvas{width:100%!important;height:240px!important}
 
+/* Control */
+.ctrl-card{background:var(--card);border:1px solid var(--card-b);border-radius:16px;padding:16px}
+.mode-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.btn{padding:8px 14px;border-radius:10px;border:1px solid var(--card-b);background:rgba(255,255,255,.04);color:var(--t2);cursor:pointer;font-size:.78em}
+.btn.active{background:rgba(0,217,126,.15);border-color:rgba(0,217,126,.35);color:var(--green)}
+.ctl-row{display:grid;grid-template-columns:120px 1fr 42px;align-items:center;gap:10px;margin:10px 0}
+.ctl-row label{font-size:.78em;color:var(--t2)}
+.ctl-row input[type=range]{width:100%}
+.ctl-row span{font-size:.78em;color:var(--t1);text-align:right}
+.hint{font-size:.72em;color:var(--t3);margin-top:8px}
+
 /* Footer */
 .ftr{text-align:center;padding:24px;margin-top:20px;border-top:1px solid var(--card-b)}
 .ftr span{font-size:.7em;color:var(--t3);font-weight:400}
@@ -136,6 +147,26 @@ body::before{content:'';position:fixed;top:-50%;left:-50%;width:200%;height:200%
     <div class="chart-card"><canvas id="chart"></canvas></div>
   </div>
 
+  <div class="sec">
+    <div class="sec-hdr"><span class="badge badge-soil">CTRL</span><span class="sec-title">设备控制</span></div>
+    <div class="ctrl-card">
+      <div class="mode-row">
+        <button class="btn active" id="btn_manual" onclick="setMode('manual')">人工模式</button>
+        <button class="btn" id="btn_smart" onclick="setMode('smart')">智能模式</button>
+      </div>
+      <div id="manual_panel">
+        <div class="ctl-row"><label>风扇速度</label><input id="fan" type="range" min="0" max="100" value="0" oninput="onManualSlider()"><span id="fan_v">0</span></div>
+        <div class="ctl-row"><label>水泵速度</label><input id="pump" type="range" min="0" max="100" value="0" oninput="onManualSlider()"><span id="pump_v">0</span></div>
+        <div class="ctl-row"><label>舵机角度</label><input id="servo" type="range" min="0" max="180" value="90" oninput="onManualSlider()"><span id="servo_v">90</span></div>
+        <div class="mode-row" style="margin-top:8px">
+          <button class="btn active" onclick="sendManualControl()">下发人工控制</button>
+        </div>
+      </div>
+      <div class="hint" id="ctrl_hint">当前模式：人工</div>
+      <div class="hint" id="ctrl_reason">最近策略：init</div>
+    </div>
+  </div>
+
   <div class="ftr">
     <span>SEQ <span class="tag" id="seq">-</span> OK <span class="tag" id="ok">0</span> FAIL <span class="tag" id="fail">0</span></span>
     <br><br>
@@ -146,6 +177,7 @@ body::before{content:'';position:fixed;top:-50%;left:-50%;width:200%;height:200%
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <script>
 var curTab=0,chart=null,histData=[];
+var curMode='manual';
 var C={
   blue:'#3b82f6',cyan:'#06b6d4',green:'#00d97e',orange:'#f59e0b',
   red:'#ef4444',purple:'#a855f7',pink:'#ec4899'
@@ -207,6 +239,59 @@ function switchChart(i){
 
 function animateValue(el,val){el.textContent=val;}
 
+function onManualSlider(){
+  document.getElementById('fan_v').textContent=document.getElementById('fan').value;
+  document.getElementById('pump_v').textContent=document.getElementById('pump').value;
+  document.getElementById('servo_v').textContent=document.getElementById('servo').value;
+}
+
+function refreshModeUI(){
+  var isSmart=curMode==='smart';
+  document.getElementById('btn_manual').className='btn'+(isSmart?'':' active');
+  document.getElementById('btn_smart').className='btn'+(isSmart?' active':'');
+  document.getElementById('manual_panel').style.opacity=isSmart?0.45:1;
+  document.getElementById('manual_panel').style.pointerEvents=isSmart?'none':'auto';
+  document.getElementById('ctrl_hint').textContent='当前模式：'+(isSmart?'智能（大模型自动调节）':'人工（网页手动控制）');
+}
+
+function setMode(mode){
+  fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:mode})})
+    .then(function(r){return r.json()})
+    .then(function(d){
+      curMode=d.mode||mode;
+      if(typeof d.reason==='string') document.getElementById('ctrl_reason').textContent='最近策略：'+d.reason;
+      refreshModeUI();
+    });
+}
+
+function sendManualControl(){
+  var payload={
+    mode:'manual',
+    fan:parseInt(document.getElementById('fan').value,10),
+    pump:parseInt(document.getElementById('pump').value,10),
+    servo:parseInt(document.getElementById('servo').value,10)
+  };
+  fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
+    .then(function(r){return r.json()})
+    .then(function(d){
+      curMode=d.mode||'manual';
+      if(typeof d.reason==='string') document.getElementById('ctrl_reason').textContent='最近策略：'+d.reason;
+      refreshModeUI();
+    });
+}
+
+function fetchControl(){
+  fetch('/api/control').then(function(r){return r.json()}).then(function(d){
+    curMode=d.mode||curMode;
+    if(typeof d.fan==='number') document.getElementById('fan').value=d.fan;
+    if(typeof d.pump==='number') document.getElementById('pump').value=d.pump;
+    if(typeof d.servo==='number') document.getElementById('servo').value=d.servo;
+    if(typeof d.reason==='string') document.getElementById('ctrl_reason').textContent='最近策略：'+d.reason;
+    onManualSlider();
+    refreshModeUI();
+  }).catch(function(){});
+}
+
 function update(){
   fetch('/api/data').then(function(r){return r.json()}).then(function(d){
     document.getElementById('dot').className='pulse on';
@@ -224,6 +309,8 @@ function update(){
     document.getElementById('seq').textContent=d.seq;
     document.getElementById('ok').textContent=d.ok;
     document.getElementById('fail').textContent=d.fail;
+    if(d.mode){curMode=d.mode;refreshModeUI();}
+    if(typeof d.reason==='string') document.getElementById('ctrl_reason').textContent='最近策略：'+d.reason;
   }).catch(function(){
     document.getElementById('dot').className='pulse';
     document.getElementById('stxt').textContent='Offline';
@@ -236,9 +323,11 @@ function fetchHistory(){
   }).catch(function(){});
 }
 
-update();fetchHistory();
+onManualSlider();
+update();fetchHistory();fetchControl();
 setInterval(update,2000);
 setInterval(fetchHistory,4000);
+setInterval(fetchControl,4000);
 </script>
 </body>
 </html>
