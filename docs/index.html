@@ -187,6 +187,32 @@ body{
   font-size:22px;
   font-weight:800;
 }
+.mode-actions{
+  margin-top:14px;
+  display:flex;
+  gap:10px;
+  flex-wrap:wrap;
+}
+.mode-btn{
+  border:1px solid var(--line-strong);
+  border-radius:12px;
+  background:#fff;
+  color:#46606b;
+  padding:10px 18px;
+  font-size:14px;
+  font-weight:700;
+  cursor:pointer;
+}
+.mode-btn.active{
+  background:var(--green);
+  border-color:var(--green);
+  color:#fff;
+}
+.mode-note{
+  margin-top:10px;
+  font-size:13px;
+  color:var(--muted);
+}
 .tabs{
   display:flex;
   gap:8px;
@@ -354,6 +380,11 @@ body{
         <div class="mini"><div class="k">最近策略</div><div class="v v-blue" id="reason_text">--</div></div>
         <div class="mini"><div class="k">更新时间</div><div class="v v-orange" id="updated_text">--</div></div>
       </div>
+      <div class="mode-actions">
+        <button class="mode-btn" id="btn_manual" onclick="setControlMode('manual')">切换人工模式</button>
+        <button class="mode-btn" id="btn_smart" onclick="setControlMode('smart')">切换智能模式</button>
+      </div>
+      <div class="mode-note" id="mode_note">点击按钮后会通过 ESP32 下发模式切换指令。</div>
     </div>
   </section>
 
@@ -397,6 +428,7 @@ let chart = null;
 let currentTab = 0;
 let historyCache = {};
 let esp32Base = '';
+let currentMode = '';
 
 const tabConfigs = [
   { ids: ['env_temp', 'soil_temp'], labels: ['环境温度', '土壤温度'], colors: ['#f08c00', '#e03131'] },
@@ -437,6 +469,39 @@ function saveEsp32Base(){
   localStorage.setItem('esp32_base', esp32Base);
   setText('source_text', esp32Base ? 'ESP32已配置' : '需填ESP32地址');
   refreshAll();
+}
+
+function refreshModeButtons(){
+  const manualBtn = document.getElementById('btn_manual');
+  const smartBtn = document.getElementById('btn_smart');
+  if (!manualBtn || !smartBtn) return;
+  manualBtn.className = 'mode-btn' + (currentMode === 'manual' ? ' active' : '');
+  smartBtn.className = 'mode-btn' + (currentMode === 'smart' ? ' active' : '');
+}
+
+async function setControlMode(mode){
+  if (!esp32Base) {
+    setText('mode_note', '请先填写 ESP32 地址，再切换模式。');
+    return;
+  }
+  try {
+    const resp = await fetch(esp32Base + '/api/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: mode })
+    });
+    if (!resp.ok) {
+      throw new Error('ESP32 API HTTP ' + resp.status);
+    }
+    const data = await resp.json();
+    currentMode = data && typeof data.mode === 'string' ? data.mode : mode;
+    refreshModeButtons();
+    setText('mode_note', currentMode === 'smart' ? '已切换到智能模式。' : '已切换到人工模式。');
+    await refreshAll();
+  } catch (err) {
+    console.error('setControlMode error:', err);
+    setText('mode_note', '模式切换失败，请检查 ESP32 地址和网络连接。');
+  }
 }
 
 function toFixedSafe(value, digits){
@@ -558,8 +623,10 @@ function updateDashboard(resp, esp32Data){
 
   setPanelText('alert_text', alertText, '当前未检测到明显异常');
   setPanelText('ai_reply_text', aiReply, 'ESP32 暂未返回大模型回复');
+  currentMode = mode;
   setText('mode_name', mode === 'smart' ? '智能' : mode === 'manual' ? '人工' : String(mode));
   setText('reason_text', String(reason));
+  refreshModeButtons();
 
   document.getElementById('dot').className = 'dot on';
   setText('status_text', esp32Data ? 'OneNet 在线 / ESP32 已连接' : 'OneNet 在线 / ESP32 未连接');
