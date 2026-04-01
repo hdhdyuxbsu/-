@@ -1,4 +1,4 @@
-#include "spark_chat.h"
+#include "doubao_chat.h"
 
 #include "esp_crt_bundle.h"
 
@@ -11,23 +11,7 @@
 #include "esp_crt_bundle.h"
 #include "cJSON.h"
 
-#define TAG "SparkChat"
-
-static const char *detect_ai_platform(const char *url) {
-    if (url == NULL) {
-        return "unknown";
-    }
-    if (strstr(url, "volces.com") != NULL || strstr(url, "ark.cn-") != NULL) {
-        return "doubao-ark";
-    }
-    if (strstr(url, "xf-yun.com") != NULL || strstr(url, "spark-api") != NULL) {
-        return "iflytek-spark";
-    }
-    if (strstr(url, "openai.com") != NULL) {
-        return "openai";
-    }
-    return "unknown";
-}
+#define TAG "DoubaoChat"
 
 static void get_url_host(const char *url, char *host_buf, size_t host_buf_len) {
     if (host_buf == NULL || host_buf_len == 0) {
@@ -61,7 +45,7 @@ static void safe_strcpy(char *dst, size_t dst_len, const char *src) {
     dst[dst_len - 1] = '\0';
 }
 
-static uint32_t history_total_len(const spark_chat_client_t *client) {
+static uint32_t history_total_len(const doubao_chat_client_t *client) {
     uint32_t total = 0;
     for (uint8_t i = 0; i < client->history_len; i++) {
         total += (uint32_t)strlen(client->history[i].content);
@@ -69,7 +53,7 @@ static uint32_t history_total_len(const spark_chat_client_t *client) {
     return total;
 }
 
-void spark_chat_init(spark_chat_client_t *client, const spark_chat_config_t *cfg) {
+void doubao_chat_init(doubao_chat_client_t *client, const doubao_chat_config_t *cfg) {
     if (client == NULL) {
         return;
     }
@@ -81,9 +65,8 @@ void spark_chat_init(spark_chat_client_t *client, const spark_chat_config_t *cfg
     }
 
     if (client->cfg.model == NULL) {
-        client->cfg.model = "lite";  // 默认使用Spark Lite模型
+        client->cfg.model = "ep-m-20251108165819-4j5wk";  // 默认使用豆包模型
     }
-    // user_id 保持 NULL 不设默认值（Ark 不需要此字段）
     if (client->cfg.search_mode == NULL) {
         client->cfg.search_mode = "deep";
     }
@@ -91,7 +74,8 @@ void spark_chat_init(spark_chat_client_t *client, const spark_chat_config_t *cfg
         client->cfg.timeout_ms = 30000;
     }
 
-    client->cfg.stream = true;
+    // 不再强制覆盖 stream 设置，保留用户配置
+    // client->cfg.stream = true;
 
     client->is_first_content = true;
     client->http_client = NULL;
@@ -99,13 +83,12 @@ void spark_chat_init(spark_chat_client_t *client, const spark_chat_config_t *cfg
 
     char host[96];
     get_url_host(client->cfg.url, host, sizeof(host));
-    ESP_LOGI(TAG, "AI配置: platform=%s, host=%s, model=%s",
-        detect_ai_platform(client->cfg.url),
+    ESP_LOGI(TAG, "豆包AI配置: host=%s, model=%s",
         host[0] != '\0' ? host : "(none)",
         client->cfg.model != NULL ? client->cfg.model : "(none)");
 }
 
-void spark_chat_set_callbacks(spark_chat_client_t *client, const spark_chat_callbacks_t *cb) {
+void doubao_chat_set_callbacks(doubao_chat_client_t *client, const doubao_chat_callbacks_t *cb) {
     if (client == NULL) {
         return;
     }
@@ -116,17 +99,17 @@ void spark_chat_set_callbacks(spark_chat_client_t *client, const spark_chat_call
     client->cb = *cb;
 }
 
-bool spark_chat_add_message(spark_chat_client_t *client, const char *role, const char *content) {
+bool doubao_chat_add_message(doubao_chat_client_t *client, const char *role, const char *content) {
     if (client == NULL || role == NULL || content == NULL || content[0] == '\0') {
         return false;
     }
 
-    if (client->history_len >= SPARK_CHAT_MAX_CHAT_HISTORY) {
-        for (uint8_t i = 0; i < SPARK_CHAT_MAX_CHAT_HISTORY - 1; i++) {
-            memcpy(&client->history[i], &client->history[i + 1], sizeof(spark_chat_message_t));
+    if (client->history_len >= DOUBAO_CHAT_MAX_CHAT_HISTORY) {
+        for (uint8_t i = 0; i < DOUBAO_CHAT_MAX_CHAT_HISTORY - 1; i++) {
+            memcpy(&client->history[i], &client->history[i + 1], sizeof(doubao_chat_message_t));
         }
         client->history_len--;
-        memset(&client->history[client->history_len], 0, sizeof(spark_chat_message_t));
+        memset(&client->history[client->history_len], 0, sizeof(doubao_chat_message_t));
     }
 
     safe_strcpy(client->history[client->history_len].role, sizeof(client->history[client->history_len].role), role);
@@ -135,51 +118,40 @@ bool spark_chat_add_message(spark_chat_client_t *client, const char *role, const
     return true;
 }
 
-void spark_chat_clear_history(spark_chat_client_t *client) {
+void doubao_chat_clear_history(doubao_chat_client_t *client) {
     if (client == NULL) {
         return;
     }
-    // 清除所有对话历史
-    for (uint8_t i = 0; i < SPARK_CHAT_MAX_CHAT_HISTORY; i++) {
-        memset(&client->history[i], 0, sizeof(spark_chat_message_t));
+    for (uint8_t i = 0; i < DOUBAO_CHAT_MAX_CHAT_HISTORY; i++) {
+        memset(&client->history[i], 0, sizeof(doubao_chat_message_t));
     }
     client->history_len = 0;
-
 }
 
-void spark_chat_trim_history(spark_chat_client_t *client) {
+void doubao_chat_trim_history(doubao_chat_client_t *client) {
     if (client == NULL) {
         return;
     }
 
-    while (history_total_len(client) > SPARK_CHAT_MAX_TOTAL_CONTENT) {
+    while (history_total_len(client) > DOUBAO_CHAT_MAX_TOTAL_CONTENT) {
         if (client->history_len <= 1) {
             break;
         }
         for (uint8_t i = 0; i < client->history_len - 1; i++) {
-            memcpy(&client->history[i], &client->history[i + 1], sizeof(spark_chat_message_t));
+            memcpy(&client->history[i], &client->history[i + 1], sizeof(doubao_chat_message_t));
         }
         client->history_len--;
-        memset(&client->history[client->history_len], 0, sizeof(spark_chat_message_t));
-
+        memset(&client->history[client->history_len], 0, sizeof(doubao_chat_message_t));
     }
 }
 
-static bool build_request_json(const spark_chat_client_t *client, char *json_buf, size_t buf_len) {
+static bool build_request_json(const doubao_chat_client_t *client, char *json_buf, size_t buf_len) {
     if (client == NULL || json_buf == NULL || buf_len == 0) {
         return false;
     }
     memset(json_buf, 0, buf_len);
 
-    // 兼容：
-    // - Chat Completions: {model, stream, messages:[{role, content}]}
-    // - Ark Responses:    {model, stream, input:[{role, content:[{type:"input_text", text:"..."}]}]}
-    bool use_ark_responses = false;
-    if (client->cfg.url != NULL) {
-        // 简单判断：URL 包含 /responses 则使用 Responses 请求格式
-        use_ark_responses = (strstr(client->cfg.url, "/responses") != NULL);
-    }
-
+    // 豆包 Ark Chat Completions 格式: {model, stream, messages:[{role, content}]}
     cJSON *root = cJSON_CreateObject();
     if (root == NULL) {
         return false;
@@ -188,47 +160,21 @@ static bool build_request_json(const spark_chat_client_t *client, char *json_buf
     cJSON_AddStringToObject(root, "model", client->cfg.model);
     cJSON_AddBoolToObject(root, "stream", client->cfg.stream);
 
-    if (use_ark_responses) {
-        // Ark Responses 格式（官方文档）：
-        // - system 消息 → instructions 字段
-        // - 其余消息 → input 数组，每项必须含 type:"message"
-        // - 关闭思考以加速响应
-        cJSON *thinking = cJSON_CreateObject();
-        cJSON_AddStringToObject(thinking, "type", "disabled");
-        cJSON_AddItemToObject(root, "thinking", thinking);
-
-        cJSON *input = cJSON_CreateArray();
-        for (uint8_t i = 0; i < client->history_len; i++) {
-            if (strcmp(client->history[i].role, "system") == 0) {
-                // system 消息放到顶层 instructions 字段
-                cJSON_AddStringToObject(root, "instructions", client->history[i].content);
-            } else {
-                cJSON *msg = cJSON_CreateObject();
-                cJSON_AddStringToObject(msg, "type", "message");
-                cJSON_AddStringToObject(msg, "role", client->history[i].role);
-                // 简单文本用字符串格式（非数组），兼容性最好
-                cJSON_AddStringToObject(msg, "content", client->history[i].content);
-                cJSON_AddItemToArray(input, msg);
-            }
-        }
-        cJSON_AddItemToObject(root, "input", input);
-    } else {
-        // Chat Completions messages 结构
-        if (client->cfg.user_id != NULL) {
-            cJSON_AddStringToObject(root, "user", client->cfg.user_id);
-        }
-        cJSON *messages = cJSON_CreateArray();
-        for (uint8_t i = 0; i < client->history_len; i++) {
-            cJSON *msg = cJSON_CreateObject();
-            cJSON_AddStringToObject(msg, "role", client->history[i].role);
-            cJSON_AddStringToObject(msg, "content", client->history[i].content);
-            cJSON_AddItemToArray(messages, msg);
-        }
-        cJSON_AddItemToObject(root, "messages", messages);
+    // Chat Completions messages 结构
+    if (client->cfg.user_id != NULL) {
+        cJSON_AddStringToObject(root, "user", client->cfg.user_id);
     }
+    cJSON *messages = cJSON_CreateArray();
+    for (uint8_t i = 0; i < client->history_len; i++) {
+        cJSON *msg = cJSON_CreateObject();
+        cJSON_AddStringToObject(msg, "role", client->history[i].role);
+        cJSON_AddStringToObject(msg, "content", client->history[i].content);
+        cJSON_AddItemToArray(messages, msg);
+    }
+    cJSON_AddItemToObject(root, "messages", messages);
 
-    if (!use_ark_responses && client->cfg.enable_web_search) {
-        /* 豆包 Ark Chat Completions: web_search 作为顶层参数 */
+    // 豆包 Ark Chat Completions: web_search 作为顶层参数
+    if (client->cfg.enable_web_search) {
         cJSON *web_search = cJSON_CreateObject();
         cJSON_AddBoolToObject(web_search, "enable", true);
         cJSON_AddStringToObject(web_search, "search_mode",
@@ -251,14 +197,7 @@ static bool build_request_json(const spark_chat_client_t *client, char *json_buf
     return true;
 }
 
-// 思维链输出已禁用，节省内存
-static void stream_reasoning(spark_chat_client_t *client, const char *text) {
-    (void)client;
-    (void)text;
-    // 不输出思维链内容
-}
-
-static void stream_content(spark_chat_client_t *client, const char *text) {
+static void stream_content(doubao_chat_client_t *client, const char *text) {
     if (text == NULL || text[0] == '\0') {
         return;
     }
@@ -274,13 +213,13 @@ static void stream_content(spark_chat_client_t *client, const char *text) {
         fflush(stdout);
     }
 
-    strncat(client->full_response, text, SPARK_CHAT_MAX_FULL_RESPONSE - strlen(client->full_response) - 1);
+    strncat(client->full_response, text, DOUBAO_CHAT_MAX_FULL_RESPONSE - strlen(client->full_response) - 1);
 }
 
 /**
- * @brief 处理单个 SSE 数据行
+ * @brief 处理单个 SSE 数据行或完整 JSON 响应
  */
-static void process_sse_line(spark_chat_client_t *client, const char *line) {
+static void process_sse_line(doubao_chat_client_t *client, const char *line) {
     if (line == NULL || line[0] == '\0') {
         return;
     }
@@ -295,7 +234,7 @@ static void process_sse_line(spark_chat_client_t *client, const char *line) {
         return;
     }
     
-    // 解析 "data: {json}" 格式
+    // 解析 "data: {json}" 格式（流式）或直接 JSON（非流式）
     const char *json_start = line;
     if (strncmp(line, "data:", 5) == 0) {
         json_start = line + 5;
@@ -310,7 +249,6 @@ static void process_sse_line(spark_chat_client_t *client, const char *line) {
     
     cJSON *root = cJSON_Parse(json_start);
     if (root == NULL) {
-        // JSON 解析失败，可能是不完整的数据
         return;
     }
 
@@ -324,27 +262,6 @@ static void process_sse_line(spark_chat_client_t *client, const char *line) {
         return;
     }
 
-    // Ark/OpenAI Responses 流式：data: {"type":"response.output_text.delta","delta":"..."}
-    cJSON *type = cJSON_GetObjectItem(root, "type");
-    if (type != NULL && cJSON_IsString(type) && type->valuestring != NULL) {
-        const char *t = type->valuestring;
-        if (strstr(t, "output_text") != NULL) {
-            cJSON *delta = cJSON_GetObjectItem(root, "delta");
-            if (delta != NULL && cJSON_IsString(delta) && delta->valuestring != NULL) {
-                stream_content(client, delta->valuestring);
-                cJSON_Delete(root);
-                return;
-            }
-            cJSON *text = cJSON_GetObjectItem(root, "text");
-            if (text != NULL && cJSON_IsString(text) && text->valuestring != NULL) {
-                stream_content(client, text->valuestring);
-                cJSON_Delete(root);
-                return;
-            }
-        }
-        // 其他 type 事件（completed/created 等）忽略
-    }
-    
     // 检查是否是错误响应
     cJSON *code = cJSON_GetObjectItem(root, "code");
     if (code != NULL && cJSON_IsNumber(code) && code->valueint != 0) {
@@ -362,31 +279,34 @@ static void process_sse_line(spark_chat_client_t *client, const char *line) {
     }
     
     cJSON *first_choice = cJSON_GetArrayItem(choices, 0);
+    
+    // 先尝试流式格式 (delta)
     cJSON *delta = cJSON_GetObjectItem(first_choice, "delta");
-    if (delta == NULL) {
-        cJSON_Delete(root);
-        return;
-    }
-    
-    cJSON *reasoning = cJSON_GetObjectItem(delta, "reasoning_content");
-    if (reasoning != NULL && cJSON_IsString(reasoning) && reasoning->valuestring != NULL) {
-        stream_reasoning(client, reasoning->valuestring);
-    }
-    
-    cJSON *content = cJSON_GetObjectItem(delta, "content");
-    if (content != NULL && cJSON_IsString(content) && content->valuestring != NULL) {
-        stream_content(client, content->valuestring);
+    if (delta != NULL) {
+        cJSON *content = cJSON_GetObjectItem(delta, "content");
+        if (content != NULL && cJSON_IsString(content) && content->valuestring != NULL) {
+            stream_content(client, content->valuestring);
+        }
+    } else {
+        // 非流式格式 (message)
+        cJSON *message = cJSON_GetObjectItem(first_choice, "message");
+        if (message != NULL) {
+            cJSON *content = cJSON_GetObjectItem(message, "content");
+            if (content != NULL && cJSON_IsString(content) && content->valuestring != NULL) {
+                stream_content(client, content->valuestring);
+            }
+        }
     }
     
     cJSON_Delete(root);
 }
 
-static esp_err_t spark_http_event_handler(esp_http_client_event_t *evt) {
+static esp_err_t doubao_http_event_handler(esp_http_client_event_t *evt) {
     if (evt == NULL) {
         return ESP_OK;
     }
 
-    spark_chat_client_t *client = (spark_chat_client_t *)evt->user_data;
+    doubao_chat_client_t *client = (doubao_chat_client_t *)evt->user_data;
 
     switch (evt->event_id) {
         case HTTP_EVENT_ON_DATA: {
@@ -395,7 +315,7 @@ static esp_err_t spark_http_event_handler(esp_http_client_event_t *evt) {
             }
             
             // 将新数据追加到 SSE 缓冲区
-            size_t space_left = SPARK_CHAT_SSE_BUFFER_SIZE - client->sse_buffer_len - 1;
+            size_t space_left = DOUBAO_CHAT_SSE_BUFFER_SIZE - client->sse_buffer_len - 1;
             size_t copy_len = (evt->data_len < space_left) ? evt->data_len : space_left;
             if (copy_len > 0) {
                 memcpy(client->sse_buffer + client->sse_buffer_len, evt->data, copy_len);
@@ -403,22 +323,18 @@ static esp_err_t spark_http_event_handler(esp_http_client_event_t *evt) {
                 client->sse_buffer[client->sse_buffer_len] = '\0';
             }
             
-            // 按行处理 SSE 数据（每行以 \n\n 或 \n 结束）
+            // 按行处理 SSE 数据
             char *line_start = client->sse_buffer;
             char *newline;
             
             while ((newline = strstr(line_start, "\n")) != NULL) {
-                // 找到一行完整数据
                 *newline = '\0';
                 
-                // 处理这一行
                 if (strlen(line_start) > 0) {
                     process_sse_line(client, line_start);
                 }
                 
-                // 移动到下一行
                 line_start = newline + 1;
-                // 跳过可能的额外换行符
                 while (*line_start == '\n' || *line_start == '\r') {
                     line_start++;
                 }
@@ -443,8 +359,6 @@ static esp_err_t spark_http_event_handler(esp_http_client_event_t *evt) {
             break;
 
         case HTTP_EVENT_ON_CONNECTED:
-
-            // 清空 SSE 缓冲区
             if (client != NULL) {
                 client->sse_buffer[0] = '\0';
                 client->sse_buffer_len = 0;
@@ -452,8 +366,6 @@ static esp_err_t spark_http_event_handler(esp_http_client_event_t *evt) {
             break;
 
         case HTTP_EVENT_DISCONNECTED:
-
-            // 处理缓冲区中剩余的数据
             if (client != NULL && client->sse_buffer_len > 0) {
                 process_sse_line(client, client->sse_buffer);
                 client->sse_buffer[0] = '\0';
@@ -468,7 +380,7 @@ static esp_err_t spark_http_event_handler(esp_http_client_event_t *evt) {
     return ESP_OK;
 }
 
-bool spark_chat_request(spark_chat_client_t *client) {
+bool doubao_chat_request(doubao_chat_client_t *client) {
     if (client == NULL || client->cfg.url == NULL || client->cfg.api_key == NULL) {
         return false;
     }
@@ -476,7 +388,7 @@ bool spark_chat_request(spark_chat_client_t *client) {
     memset(client->full_response, 0, sizeof(client->full_response));
     client->is_first_content = true;
 
-    char request_json[SPARK_CHAT_MAX_REQUEST_JSON] = {0};
+    char request_json[DOUBAO_CHAT_MAX_REQUEST_JSON] = {0};
     if (!build_request_json(client, request_json, sizeof(request_json))) {
         ESP_LOGE(TAG, "构建请求JSON失败");
         return false;
@@ -484,24 +396,23 @@ bool spark_chat_request(spark_chat_client_t *client) {
 
     char host[96];
     get_url_host(client->cfg.url, host, sizeof(host));
-    ESP_LOGI(TAG, "请求AI: platform=%s, host=%s, model=%s, payload=%d bytes",
-        detect_ai_platform(client->cfg.url),
+    ESP_LOGI(TAG, "请求豆包AI: host=%s, model=%s, payload=%d bytes",
         host[0] != '\0' ? host : "(none)",
         client->cfg.model != NULL ? client->cfg.model : "(none)",
         (int)strlen(request_json));
+    ESP_LOGI(TAG, "Request JSON: %.500s", request_json);  // 打印前500字符
 
     // 如果没有活跃连接，创建新的 HTTP 客户端
     if (client->http_client == NULL) {
         uint32_t timeout = client->cfg.timeout_ms;
-        if (timeout > 15000) timeout = 15000;  // 限制超时时间
+        if (timeout > 15000) timeout = 15000;
         
         esp_http_client_config_t config = {
             .url = client->cfg.url,
-            .event_handler = spark_http_event_handler,
+            .event_handler = doubao_http_event_handler,
             .user_data = client,
             .method = HTTP_METHOD_POST,
             .timeout_ms = timeout,
-            // 使用证书包校验 HTTPS（同时也会确保设置 hostname/SNI）
             .crt_bundle_attach = esp_crt_bundle_attach,
             .cert_pem = NULL,
             .skip_cert_common_name_check = false,
@@ -509,7 +420,7 @@ bool spark_chat_request(spark_chat_client_t *client) {
             .buffer_size = 1024,
             .buffer_size_tx = 1024,
             .is_async = false,
-            .keep_alive_enable = false,  // 禁用 keep-alive 减少复杂性
+            .keep_alive_enable = false,
             .disable_auto_redirect = false,
         };
 
@@ -518,16 +429,13 @@ bool spark_chat_request(spark_chat_client_t *client) {
             ESP_LOGE(TAG, "初始化HTTP客户端失败");
             return false;
         }
-        
     }
 
-    // 构建认证头（检查是否已包含 Bearer 前缀）
+    // 构建认证头
     char auth_header[512];
     if (strncmp(client->cfg.api_key, "Bearer ", 7) == 0) {
-        // 已经包含 Bearer 前缀，直接使用
         snprintf(auth_header, sizeof(auth_header), "%s", client->cfg.api_key);
     } else {
-        // 添加 Bearer 前缀
         snprintf(auth_header, sizeof(auth_header), "Bearer %s", client->cfg.api_key);
     }
     
@@ -541,7 +449,6 @@ bool spark_chat_request(spark_chat_client_t *client) {
     
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "HTTP请求失败: %s (0x%x)", esp_err_to_name(err), err);
-        // 连接失败，清理并下次重新创建
         esp_http_client_cleanup(client->http_client);
         client->http_client = NULL;
         client->connection_active = false;
@@ -553,12 +460,10 @@ bool spark_chat_request(spark_chat_client_t *client) {
     if (http_code != 200) {
         ESP_LOGE(TAG, "HTTP响应错误，状态码: %d", http_code);
         if (http_code == 401) {
-            ESP_LOGE(TAG, "鉴权失败：请检查API Key是否正确、是否带Bearer前缀、是否调用了正确平台。");
+            ESP_LOGE(TAG, "鉴权失败：请检查API Key是否正确");
         } else if (http_code == 403) {
-            ESP_LOGE(TAG, "权限/计费失败：当前平台=%s，常见原因是账号欠费、模型未开通或Key无权限。",
-                detect_ai_platform(client->cfg.url));
+            ESP_LOGE(TAG, "权限/计费失败：常见原因是账号欠费、模型未开通或Key无权限");
         }
-        // 错误响应，清理连接
         esp_http_client_cleanup(client->http_client);
         client->http_client = NULL;
         client->connection_active = false;
@@ -570,7 +475,7 @@ bool spark_chat_request(spark_chat_client_t *client) {
     return true;
 }
 
-void spark_chat_close_connection(spark_chat_client_t *client) {
+void doubao_chat_close_connection(doubao_chat_client_t *client) {
     if (client == NULL) {
         return;
     }
@@ -582,7 +487,7 @@ void spark_chat_close_connection(spark_chat_client_t *client) {
     client->connection_active = false;
 }
 
-const char *spark_chat_get_last_response(const spark_chat_client_t *client) {
+const char *doubao_chat_get_last_response(const doubao_chat_client_t *client) {
     if (client == NULL) {
         return "";
     }

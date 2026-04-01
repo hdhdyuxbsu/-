@@ -471,6 +471,9 @@ const ONENET_DEVICE_NAME = 'dachuang';
 const ONENET_API_BASE = 'https://iot-api.heclouds.com';
 const ONENET_KEY_B64 = 'aDFIWDNUeFpLTTdUTzdCS1VzdWlyV3JLS3pnR2tkdVU=';
 const ONENET_ET = '2057492169';
+const ONENET_TIMEOUT_MS = 10000;
+const ESP32_TIMEOUT_MS = 5000;
+const LOADER_FAILSAFE_MS = 15000;
 
 let cachedToken = null;
 let chart = null;
@@ -486,6 +489,22 @@ const tabConfigs = [
   { ids: ['lux'], labels: ['光照强度'], colors: ['#f59f00'] },
   { ids: ['ph'], labels: ['酸碱度'], colors: ['#0b7285'] }
 ];
+
+async function fetchWithTimeout(url, options, timeoutMs){
+  const controller = new AbortController();
+  const timer = setTimeout(function(){ controller.abort(); }, timeoutMs);
+  try {
+    const merged = Object.assign({}, options || {}, { signal: controller.signal });
+    return await fetch(url, merged);
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      throw new Error('请求超时 ' + timeoutMs + 'ms');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function setText(id, text){
   const el = document.getElementById(id);
@@ -659,10 +678,10 @@ async function getToken(){
 
 async function oneNetGet(path){
   const token = await getToken();
-  const resp = await fetch(ONENET_API_BASE + path, {
+  const resp = await fetchWithTimeout(ONENET_API_BASE + path, {
     headers: { authorization: token },
     cache: 'no-store'
-  });
+  }, ONENET_TIMEOUT_MS);
   if (!resp.ok) {
     throw new Error('OneNet HTTP ' + resp.status);
   }
@@ -675,7 +694,7 @@ async function fetchLatest(){
 
 async function fetchEsp32Status(){
   if (!esp32Base) throw new Error('ESP32 base not configured');
-  const resp = await fetch(esp32Base + '/api/data', { cache: 'no-store' });
+  const resp = await fetchWithTimeout(esp32Base + '/api/data', { cache: 'no-store' }, ESP32_TIMEOUT_MS);
   if (!resp.ok) {
     throw new Error('ESP32 API HTTP ' + resp.status);
   }
@@ -856,11 +875,16 @@ function renderChart(){
 async function loadHistory(){
   const ids = ['env_temp', 'soil_temp', 'env_humi', 'soil_humi', 'lux', 'ph'];
   for (const id of ids) {
-    const resp = await fetchHistory(id);
-    const list = resp && resp.data && Array.isArray(resp.data.list) ? resp.data.list : [];
-    historyCache[id] = list.map(function(item){
-      return { time: Number(item.time), value: Number(item.value) };
-    });
+    try {
+      const resp = await fetchHistory(id);
+      const list = resp && resp.data && Array.isArray(resp.data.list) ? resp.data.list : [];
+      historyCache[id] = list.map(function(item){
+        return { time: Number(item.time), value: Number(item.value) };
+      });
+    } catch (err) {
+      console.warn('loadHistory failed for ' + id + ':', err);
+      historyCache[id] = [];
+    }
   }
   renderChart();
 }
@@ -894,11 +918,17 @@ async function refreshAll(){
     setText('status_text', 'OneNet 连接失败');
     setPanelText('alert_text', '', 'OneNet 连接失败，暂时无法读取异常信息');
     setPanelText('ai_reply_text', '', 'OneNet 连接失败，暂时无法读取 AI 回复');
+    document.getElementById('loader').classList.add('hide');
     console.error(err);
   }
 }
 
 async function init(){
+  const loaderEl = document.getElementById('loader');
+  const loaderFailSafeTimer = setTimeout(function(){
+    if (loaderEl) loaderEl.classList.add('hide');
+  }, LOADER_FAILSAFE_MS);
+
   loadEsp32Base();
   await refreshAll();
   try {
@@ -906,7 +936,8 @@ async function init(){
   } catch (err) {
     console.error('loadHistory failed:', err);
   } finally {
-    document.getElementById('loader').classList.add('hide');
+    clearTimeout(loaderFailSafeTimer);
+    if (loaderEl) loaderEl.classList.add('hide');
   }
 }
 

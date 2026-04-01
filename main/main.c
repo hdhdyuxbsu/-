@@ -3,6 +3,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
 #include "esp_err.h"
@@ -14,14 +15,16 @@
 #include "nvs_flash.h"
 #include "lwip/inet.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "mqtt_client.h"
 #include "cJSON.h"
 #include "mbedtls/md.h"
 #include "mbedtls/base64.h"
+#include "mbedtls/platform.h"
 
 /* AI 语音播报相关 */
 #include "ai_config.h"
-#include "spark_chat.h"
+#include "doubao_chat.h"
 #include "baidu_tts.h"
 #include "max98357a.h"
 /* 显示屏 */
@@ -34,6 +37,7 @@
 #define WIFI_STA_PASS      "123456789"
 #define WIFI_MAX_RETRY     10
 #define WIFI_RECONNECT_INTERVAL_MS  5000  /* 断线重连间隔(毫秒) */
+#define WIFI_MAX_TX_POWER_QDBM 52         /* 13dBm, 降低峰值电流 */
 
 /* ====== OneNet MQTT 配置 ====== */
 #define ONENET_PRODUCT_ID   "W9BY3SlO8w"
@@ -43,6 +47,7 @@
 #define ONENET_ET           "4102444800"  /* 2100-01-01, token 长期有效 */
 #define ONENET_RES          "products/" ONENET_PRODUCT_ID "/devices/" ONENET_DEVICE_NAME
 #define ONENET_TOPIC_POST   "$sys/" ONENET_PRODUCT_ID "/" ONENET_DEVICE_NAME "/thing/property/post"
+#define ONENET_TOPIC_SET    "$sys/" ONENET_PRODUCT_ID "/" ONENET_DEVICE_NAME "/thing/property/set"  /* 远程控制 */
 
 /* ====== 引脚配置（ESP32-S3 N16R8） ====== */
 /* 注意: GPIO26-37 被 Octal Flash/PSRAM 占用，不可使用 */
@@ -63,6 +68,7 @@
 #define A39C_MD0_LEVEL     1
 #define A39C_MD1_LEVEL     0
 #define A39C_DIAG_READ_CONFIG_ON_BOOT 1
+#define AUDIO_SELF_TEST_ON_BOOT 0
 
 /* ====== 帧格式 ====== */
 #define FRAME_HEAD1        0xAA
@@ -93,6 +99,7 @@ typedef struct {
     uint8_t fan_speed;    /* 0-100 */
     uint8_t pump_speed;   /* 0-100 */
     uint8_t servo_angle;  /* 0-180 */
+    uint8_t light_level;  /* 0-100 补光灯亮度 */
     uint32_t update_time_s;
     char reason[96];
 } control_state_t;
@@ -108,40 +115,127 @@ static bool mqtt_connected = false;
 static bool mqtt_pending_send = false;
 
 /* 控制模式与执行器状态 */
-static control_mode_t g_control_mode = CONTROL_MODE_MANUAL;
+static control_mode_t g_control_mode = CONTROL_MODE_SMART;
 static control_state_t g_control_state = {
     .fan_speed = 0,
     .pump_speed = 0,
     .servo_angle = 90,
+    .light_level = 0,
     .update_time_s = 0,
     .reason = "init",
 };
 static volatile bool g_smart_control_force_run = false;
 static char g_last_alert[256] = "";
 static char g_last_ai_reply[256] = "";
+static volatile bool g_auto_stop_sent = false;
+static char g_monitor_plant[64] = PLANT_SPECIES_EN;
 
-/* 控制命令协议: A5 5A MODE FAN PUMP SERVO_L SERVO_H RSV XOR */
 /*
- * STM32 control frame protocol
+ * 控制命令协议 V2 (ESP32 -> STM32)
  * Byte0  : 0xA5
  * Byte1  : 0x5A
- * Byte2  : mode   (0x01 manual, 0x02 smart)
- * Byte3  : fan    (0-100)
- * Byte4  : pump   (0-100)
- * Byte5  : servo low byte
- * Byte6  : servo high byte   (0-180)
- * Byte7  : reserved
- * Byte8  : XOR checksum of Byte0..Byte7
+ * Byte2  : ver      (0x01)
+ * Byte3  : cmd      (0x10=set control)
+ * Byte4  : seq      (递增序号)
+ * Byte5  : mode     (0x01 manual, 0x02 smart)
+ * Byte6  : fan      (0-100)
+ * Byte7  : pump     (0-100)
+ * Byte8  : servo    (0-180)
+ * Byte9  : light    (0-100, 补光灯亮度)
+ * Byte10 : XOR checksum of Byte0..Byte9
+ */
+/*
+ * 控制应答协议 V2 (STM32 -> ESP32)
+ * Byte0  : 0x5A
+ * Byte1  : 0xA5
+ * Byte2  : ver      (0x01)
+ * Byte3  : cmd      (0x90=ack)
+ * Byte4  : seq      (回显序号)
+ * Byte5  : status   (bit0=fAN_ON, bit1=PUMP_ON, bit7=APPLIED_OK)
+ * Byte6  : fan_actual
+ * Byte7  : pump_actual
+ * Byte8  : servo_actual
+ * Byte9  : err_code
+ * Byte10 : XOR checksum of Byte0..Byte9
  */
 #define CONTROL_FRAME_HEAD1 0xA5
 #define CONTROL_FRAME_HEAD2 0x5A
-#define CONTROL_FRAME_LEN   9
+#define CONTROL_ACK_HEAD1   0x5A
+#define CONTROL_ACK_HEAD2   0xA5
+#define CONTROL_FRAME_VER   0x01
+#define CONTROL_CMD_SET     0x10
+#define CONTROL_CMD_ACK     0x90
+#define CONTROL_FRAME_LEN   11
+#define CONTROL_RETRY_INTERVAL_S 10
+#define SMART_FAN_STEP_MAX  10
+#define SMART_PUMP_STEP_MAX 15
+
+typedef struct {
+    bool pending;
+    uint8_t seq;
+    uint8_t frame[CONTROL_FRAME_LEN];
+    int64_t last_send_us;
+    uint32_t retry_count;
+} control_tx_state_t;
+
+typedef struct {
+    bool valid;
+    uint8_t seq;
+    bool applied_ok;
+    bool fan_on;
+    bool pump_on;
+    uint8_t fan_actual;
+    uint8_t pump_actual;
+    uint8_t servo_actual;
+    uint8_t err_code;
+    uint32_t recv_time_s;
+} control_ack_state_t;
+
+static control_tx_state_t g_ctrl_tx = {0};
+static control_ack_state_t g_ctrl_ack = {0};
+static uint8_t g_ctrl_seq = 0;
 
 static uint8_t clamp_u8(int val, int min_v, int max_v)
 {
     if (val < min_v) return (uint8_t)min_v;
     if (val > max_v) return (uint8_t)max_v;
     return (uint8_t)val;
+}
+
+static uint8_t limit_step_u8(uint8_t current, uint8_t target, uint8_t max_step)
+{
+    if (target > current) {
+        uint16_t next = (uint16_t)current + max_step;
+        return (next < target) ? (uint8_t)next : target;
+    }
+    if (target < current) {
+        int next = (int)current - (int)max_step;
+        return (next > target) ? (uint8_t)next : target;
+    }
+    return target;
+}
+
+static void trim_text_inplace(char *s)
+{
+    if (!s) {
+        return;
+    }
+
+    size_t len = strlen(s);
+    size_t start = 0;
+    while (start < len && (s[start] == ' ' || s[start] == '\t' || s[start] == '\r' || s[start] == '\n')) {
+        start++;
+    }
+
+    size_t end = len;
+    while (end > start && (s[end - 1] == ' ' || s[end - 1] == '\t' || s[end - 1] == '\r' || s[end - 1] == '\n')) {
+        end--;
+    }
+
+    if (start > 0) {
+        memmove(s, s + start, end - start);
+    }
+    s[end - start] = '\0';
 }
 
 static void json_escape_text(const char *src, char *dst, size_t dst_size)
@@ -170,44 +264,163 @@ static void json_escape_text(const char *src, char *dst, size_t dst_size)
     dst[di] = '\0';
 }
 
-static void send_control_frame_to_stm32(control_mode_t mode, uint8_t fan, uint8_t pump, uint8_t servo)
+static uint8_t calc_xor(const uint8_t *buf, size_t len)
+{
+    uint8_t x = 0;
+    for (size_t i = 0; i < len; i++) {
+        x ^= buf[i];
+    }
+    return x;
+}
+
+static void send_control_frame_raw(const uint8_t *frame, const char *tag)
+{
+    int written = uart_write_bytes(A39C_UART_NUM, frame, CONTROL_FRAME_LEN);
+    ESP_LOG_BUFFER_HEX_LEVEL(TAG, frame, CONTROL_FRAME_LEN, ESP_LOG_INFO);
+    ESP_LOGI(TAG, "%s 下发控制帧 bytes=%d", tag, written);
+}
+
+static void send_control_frame_to_stm32(control_mode_t mode, uint8_t fan, uint8_t pump, uint8_t servo, uint8_t light)
 {
     uint8_t frame[CONTROL_FRAME_LEN] = {0};
     frame[0] = CONTROL_FRAME_HEAD1;
     frame[1] = CONTROL_FRAME_HEAD2;
-    frame[2] = (mode == CONTROL_MODE_SMART) ? 0x02 : 0x01;
-    frame[3] = fan;
-    frame[4] = pump;
-    frame[5] = (uint8_t)(servo & 0xFF);
-    frame[6] = (uint8_t)((servo >> 8) & 0xFF);
-    frame[7] = 0x00;
-    for (int i = 0; i < CONTROL_FRAME_LEN - 1; i++) {
-        frame[8] ^= frame[i];
+    frame[2] = CONTROL_FRAME_VER;
+    frame[3] = CONTROL_CMD_SET;
+    frame[4] = ++g_ctrl_seq;
+    frame[5] = (mode == CONTROL_MODE_SMART) ? 0x02 : 0x01;
+    frame[6] = fan;
+    frame[7] = pump;
+    frame[8] = servo;
+    frame[9] = light;  /* 补光灯亮度 0-100 */
+    frame[10] = calc_xor(frame, CONTROL_FRAME_LEN - 1);
+
+    memcpy(g_ctrl_tx.frame, frame, CONTROL_FRAME_LEN);
+    g_ctrl_tx.pending = true;
+    g_ctrl_tx.seq = frame[4];
+    g_ctrl_tx.retry_count = 0;
+    g_ctrl_tx.last_send_us = esp_timer_get_time();
+
+    send_control_frame_raw(frame, "CTRL");
+    ESP_LOGI(TAG, "下发控制帧V2 seq=%u mode=%s fan=%u pump=%u servo=%u light=%u，等待STM32 ACK",
+             g_ctrl_tx.seq,
+             mode == CONTROL_MODE_SMART ? "smart" : "manual",
+             fan, pump, servo, light);
+}
+
+static bool parse_control_ack_frame(const uint8_t *frame)
+{
+    if (!frame) {
+        return false;
+    }
+    if (frame[0] != CONTROL_ACK_HEAD1 || frame[1] != CONTROL_ACK_HEAD2) {
+        return false;
+    }
+    if (frame[2] != CONTROL_FRAME_VER || frame[3] != CONTROL_CMD_ACK) {
+        return false;
+    }
+    uint8_t x = calc_xor(frame, CONTROL_FRAME_LEN - 1);
+    if (x != frame[CONTROL_FRAME_LEN - 1]) {
+        ESP_LOGW(TAG, "控制ACK校验失败");
+        return false;
     }
 
-    int written = uart_write_bytes(A39C_UART_NUM, frame, CONTROL_FRAME_LEN);
-    ESP_LOG_BUFFER_HEX_LEVEL(TAG, frame, CONTROL_FRAME_LEN, ESP_LOG_INFO);
-    ESP_LOGI(TAG, "下发控制帧 mode=%s fan=%u pump=%u servo=%u bytes=%d",
-             mode == CONTROL_MODE_SMART ? "smart" : "manual",
-             fan, pump, servo, written);
+    uint8_t seq = frame[4];
+    uint8_t status = frame[5];
+    g_ctrl_ack.valid = true;
+    g_ctrl_ack.seq = seq;
+    g_ctrl_ack.applied_ok = ((status & 0x80) != 0);
+    g_ctrl_ack.fan_on = ((status & 0x01) != 0);
+    g_ctrl_ack.pump_on = ((status & 0x02) != 0);
+    g_ctrl_ack.fan_actual = frame[6];
+    g_ctrl_ack.pump_actual = frame[7];
+    g_ctrl_ack.servo_actual = frame[8];
+    g_ctrl_ack.err_code = frame[9];
+    g_ctrl_ack.recv_time_s = (uint32_t)(esp_timer_get_time() / 1000000ULL);
+
+    ESP_LOGI(TAG, "收到STM32 ACK seq=%u ok=%d fan_on=%d pump_on=%d fan=%u pump=%u servo=%u err=%u",
+             seq,
+             g_ctrl_ack.applied_ok,
+             g_ctrl_ack.fan_on,
+             g_ctrl_ack.pump_on,
+             g_ctrl_ack.fan_actual,
+             g_ctrl_ack.pump_actual,
+             g_ctrl_ack.servo_actual,
+             g_ctrl_ack.err_code);
+
+    if (g_ctrl_tx.pending && seq == g_ctrl_tx.seq) {
+        g_ctrl_tx.pending = false;
+        ESP_LOGI(TAG, "控制指令 seq=%u 已确认，停止重发", seq);
+    }
+    return true;
 }
 
 static void apply_control_and_send(control_mode_t mode, int fan_speed, int pump_speed,
-                                   int servo_angle, const char *reason)
+                                   int servo_angle, int light_level, const char *reason)
 {
-    g_control_state.fan_speed = clamp_u8(fan_speed, 0, 100);
-    g_control_state.pump_speed = clamp_u8(pump_speed, 0, 100);
-    g_control_state.servo_angle = clamp_u8(servo_angle, 0, 180);
+    uint8_t new_fan = clamp_u8(fan_speed, 0, 100);
+    uint8_t new_pump = clamp_u8(pump_speed, 0, 100);
+    uint8_t new_servo = clamp_u8(servo_angle, 0, 180);
+    uint8_t new_light = clamp_u8(light_level, 0, 100);
+
+    if (mode == CONTROL_MODE_SMART) {
+        uint8_t old_fan = g_control_state.fan_speed;
+        uint8_t old_pump = g_control_state.pump_speed;
+
+        new_fan = limit_step_u8(old_fan, new_fan, SMART_FAN_STEP_MAX);
+        new_pump = limit_step_u8(old_pump, new_pump, SMART_PUMP_STEP_MAX);
+
+        if (new_fan != (uint8_t)fan_speed) {
+            ESP_LOGI(TAG, "风扇斜坡限制: raw=%d limited=%u prev=%u max_step=%d",
+                     fan_speed, new_fan, old_fan, SMART_FAN_STEP_MAX);
+        }
+        if (new_pump != (uint8_t)pump_speed) {
+            ESP_LOGI(TAG, "泵速斜坡限制: raw=%d limited=%u prev=%u max_step=%d",
+                     pump_speed, new_pump, old_pump, SMART_PUMP_STEP_MAX);
+        }
+    }
+
+    g_control_state.fan_speed = new_fan;
+    g_control_state.pump_speed = new_pump;
+    g_control_state.servo_angle = new_servo;
+    g_control_state.light_level = new_light;
     g_control_state.update_time_s = (uint32_t)(esp_timer_get_time() / 1000000ULL);
     if (reason && reason[0]) {
         snprintf(g_control_state.reason, sizeof(g_control_state.reason), "%s", reason);
     }
     g_control_mode = mode;
 
+    if (!(g_control_state.fan_speed == 0 &&
+          g_control_state.pump_speed == 0 &&
+          g_control_state.servo_angle == 90 &&
+          g_control_state.light_level == 0)) {
+        g_auto_stop_sent = false;
+    }
+
     send_control_frame_to_stm32(g_control_mode,
                                 g_control_state.fan_speed,
                                 g_control_state.pump_speed,
-                                g_control_state.servo_angle);
+                                g_control_state.servo_angle,
+                                g_control_state.light_level);
+}
+
+static void control_retry_task(void *arg)
+{
+    while (1) {
+        if (g_ctrl_tx.pending) {
+            int64_t now_us = esp_timer_get_time();
+            int64_t elapsed_us = now_us - g_ctrl_tx.last_send_us;
+            if (elapsed_us >= (int64_t)CONTROL_RETRY_INTERVAL_S * 1000000LL) {
+                send_control_frame_raw(g_ctrl_tx.frame, "CTRL-RETRY");
+                g_ctrl_tx.last_send_us = now_us;
+                g_ctrl_tx.retry_count++;
+                ESP_LOGW(TAG, "未收到STM32 ACK，10秒重发控制帧 seq=%u retry=%lu",
+                         g_ctrl_tx.seq,
+                         (unsigned long)g_ctrl_tx.retry_count);
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 }
 
 /* 最新一帧数据（供 HTTP 接口读取） */
@@ -362,6 +575,14 @@ static void wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
+    // 降低WiFi发射功率，减少上电阶段电流尖峰触发Brownout
+    esp_err_t txp_ret = esp_wifi_set_max_tx_power(WIFI_MAX_TX_POWER_QDBM);
+    if (txp_ret == ESP_OK) {
+        ESP_LOGI(TAG, "WiFi最大发射功率已设置为 %.1f dBm", WIFI_MAX_TX_POWER_QDBM / 4.0f);
+    } else {
+        ESP_LOGW(TAG, "设置WiFi发射功率失败: %s", esp_err_to_name(txp_ret));
+    }
+
     ESP_LOGI(TAG, "正在连接WiFi: %s ...", WIFI_STA_SSID);
 
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
@@ -376,6 +597,8 @@ static void wifi_init_sta(void)
 }
 
 /* ====== HTTP 服务器 ====== */
+static esp_err_t api_plant_post_handler(httpd_req_t *req);
+
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
     size_t len = index_html_end - index_html_start;
@@ -391,33 +614,79 @@ static void set_cors_headers(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
 }
 
+static esp_err_t api_options_handler(httpd_req_t *req)
+{
+    set_cors_headers(req);
+    httpd_resp_set_status(req, "204 No Content");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
+static void *tls_calloc_prefer_psram(size_t n, size_t size)
+{
+    if (n == 0 || size == 0) {
+        return NULL;
+    }
+    if (size > SIZE_MAX / n) {
+        return NULL;
+    }
+
+    void *ptr = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!ptr) {
+        ptr = heap_caps_calloc(n, size, MALLOC_CAP_8BIT);
+    }
+    return ptr;
+}
+
+static void tls_free_prefer_psram(void *ptr)
+{
+    heap_caps_free(ptr);
+}
+
+static void init_mbedtls_allocator(void)
+{
+    int ret = mbedtls_platform_set_calloc_free(tls_calloc_prefer_psram, tls_free_prefer_psram);
+    if (ret == 0) {
+        ESP_LOGI(TAG, "mbedTLS allocator set to prefer PSRAM");
+    } else {
+        ESP_LOGW(TAG, "mbedTLS allocator setup failed: -0x%04X", -ret);
+    }
+    ESP_LOGI(TAG, "Heap snapshot: total=%lu internal=%lu psram=%lu",
+             (unsigned long)esp_get_free_heap_size(),
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
+
 static esp_err_t api_data_handler(httpd_req_t *req)
 {
     char buf[1280];
+    char plant_esc[128];
     char reason_esc[256];
     char alert_esc[320];
     char ai_reply_esc[320];
+    json_escape_text(g_monitor_plant, plant_esc, sizeof(plant_esc));
     json_escape_text(g_control_state.reason, reason_esc, sizeof(reason_esc));
     json_escape_text(g_last_alert, alert_esc, sizeof(alert_esc));
     json_escape_text(g_last_ai_reply, ai_reply_esc, sizeof(ai_reply_esc));
     if (has_data) {
-        snprintf(buf, sizeof(buf),
+    snprintf(buf, sizeof(buf),
             "{\"seq\":%u,\"lux\":%.2f,\"env_temp\":%.1f,\"env_humi\":%.1f,"
             "\"press\":%.1f,\"soil_temp\":%.1f,\"soil_humi\":%.1f,"
             "\"ph\":%.2f,\"n\":%u,\"p\":%u,\"k\":%u,"
             "\"ok\":%lu,\"fail\":%lu,"
             "\"plant\":\"%s\",\"updated\":%lu,"
-            "\"mode\":\"%s\",\"fan\":%u,\"pump\":%u,\"servo\":%u,"
-            "\"reason\":\"%s\",\"alert\":\"%s\",\"ai_reply\":\"%s\"}",
+            "\"mode\":\"%s\",\"fan\":%u,\"pump\":%u,\"servo\":%u,\"light\":%u,"
+            "\"reason\":\"%.180s\",\"alert\":\"%.220s\",\"ai_reply\":\"%.220s\"}",
             latest_pkt.seq, latest_pkt.lux, latest_pkt.env_temp_c, latest_pkt.env_humi_pct,
             latest_pkt.press_kpa, latest_pkt.soil_temp_c, latest_pkt.soil_humi_pct,
             latest_pkt.ph, latest_pkt.n, latest_pkt.p, latest_pkt.k,
             (unsigned long)ok_count, (unsigned long)fail_count,
-            PLANT_SPECIES_EN, (unsigned long)g_control_state.update_time_s,
+            plant_esc, (unsigned long)g_control_state.update_time_s,
             g_control_mode == CONTROL_MODE_SMART ? "smart" : "manual",
             g_control_state.fan_speed,
             g_control_state.pump_speed,
             g_control_state.servo_angle,
+            g_control_state.light_level,
             reason_esc,
             alert_esc,
             ai_reply_esc);
@@ -428,13 +697,14 @@ static esp_err_t api_data_handler(httpd_req_t *req)
             "\"ph\":0,\"n\":0,\"p\":0,\"k\":0,"
             "\"ok\":0,\"fail\":0,"
             "\"plant\":\"%s\",\"updated\":%lu,"
-            "\"mode\":\"%s\",\"fan\":%u,\"pump\":%u,\"servo\":%u,"
-            "\"reason\":\"%s\",\"alert\":\"%s\",\"ai_reply\":\"%s\"}",
-            PLANT_SPECIES_EN, (unsigned long)g_control_state.update_time_s,
+            "\"mode\":\"%s\",\"fan\":%u,\"pump\":%u,\"servo\":%u,\"light\":%u,"
+            "\"reason\":\"%.180s\",\"alert\":\"%.220s\",\"ai_reply\":\"%.220s\"}",
+            plant_esc, (unsigned long)g_control_state.update_time_s,
             g_control_mode == CONTROL_MODE_SMART ? "smart" : "manual",
             g_control_state.fan_speed,
             g_control_state.pump_speed,
             g_control_state.servo_angle,
+            g_control_state.light_level,
             reason_esc,
             alert_esc,
             ai_reply_esc);
@@ -448,20 +718,23 @@ static esp_err_t api_data_handler(httpd_req_t *req)
 static esp_err_t api_control_get_handler(httpd_req_t *req)
 {
     char buf[1024];
+    char plant_esc[128];
     char reason_esc[256];
     char alert_esc[320];
     char ai_reply_esc[320];
+    json_escape_text(g_monitor_plant, plant_esc, sizeof(plant_esc));
     json_escape_text(g_control_state.reason, reason_esc, sizeof(reason_esc));
     json_escape_text(g_last_alert, alert_esc, sizeof(alert_esc));
     json_escape_text(g_last_ai_reply, ai_reply_esc, sizeof(ai_reply_esc));
     snprintf(buf, sizeof(buf),
-             "{\"plant\":\"%s\",\"mode\":\"%s\",\"fan\":%u,\"pump\":%u,\"servo\":%u,"
-             "\"updated\":%lu,\"reason\":\"%s\",\"alert\":\"%s\",\"ai_reply\":\"%s\"}",
-             PLANT_SPECIES_EN,
+             "{\"plant\":\"%s\",\"mode\":\"%s\",\"fan\":%u,\"pump\":%u,\"servo\":%u,\"light\":%u,"
+             "\"updated\":%lu,\"reason\":\"%.180s\",\"alert\":\"%.220s\",\"ai_reply\":\"%.220s\"}",
+             plant_esc,
              g_control_mode == CONTROL_MODE_SMART ? "smart" : "manual",
              g_control_state.fan_speed,
              g_control_state.pump_speed,
              g_control_state.servo_angle,
+             g_control_state.light_level,
              (unsigned long)g_control_state.update_time_s,
              reason_esc,
              alert_esc,
@@ -493,6 +766,9 @@ static esp_err_t api_control_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    control_mode_t prev_mode = g_control_mode;
+    bool mode_changed = false;
+
     const cJSON *mode = cJSON_GetObjectItem(root, "mode");
     if (mode && cJSON_IsString(mode) && mode->valuestring) {
         if (strcmp(mode->valuestring, "smart") == 0) {
@@ -504,45 +780,59 @@ static esp_err_t api_control_post_handler(httpd_req_t *req)
             snprintf(g_control_state.reason, sizeof(g_control_state.reason), "web set manual");
         }
         g_control_state.update_time_s = (uint32_t)(esp_timer_get_time() / 1000000ULL);
+        mode_changed = (g_control_mode != prev_mode);
     }
 
-    if (g_control_mode == CONTROL_MODE_MANUAL) {
+    if (mode_changed) {
+        // 切换模式时强制先下发一次停止指令
+        apply_control_and_send(g_control_mode, 0, 0, 90, 0, "mode switch stop");
+        if (g_control_mode == CONTROL_MODE_SMART) {
+            g_smart_control_force_run = true;
+        }
+    } else if (g_control_mode == CONTROL_MODE_MANUAL) {
         int fan = g_control_state.fan_speed;
         int pump = g_control_state.pump_speed;
         int servo = g_control_state.servo_angle;
+        int light = g_control_state.light_level;
 
         const cJSON *fan_j = cJSON_GetObjectItem(root, "fan");
         const cJSON *pump_j = cJSON_GetObjectItem(root, "pump");
         const cJSON *servo_j = cJSON_GetObjectItem(root, "servo");
+        const cJSON *light_j = cJSON_GetObjectItem(root, "light");
 
         if (fan_j && cJSON_IsNumber(fan_j)) fan = fan_j->valueint;
         if (pump_j && cJSON_IsNumber(pump_j)) pump = pump_j->valueint;
         if (servo_j && cJSON_IsNumber(servo_j)) servo = servo_j->valueint;
+        if (light_j && cJSON_IsNumber(light_j)) light = light_j->valueint;
 
-        apply_control_and_send(CONTROL_MODE_MANUAL, fan, pump, servo, "manual web control");
+        apply_control_and_send(CONTROL_MODE_MANUAL, fan, pump, servo, light, "manual web control");
     } else {
         send_control_frame_to_stm32(g_control_mode,
                                     g_control_state.fan_speed,
                                     g_control_state.pump_speed,
-                                    g_control_state.servo_angle);
+                                    g_control_state.servo_angle,
+                                    g_control_state.light_level);
     }
 
     cJSON_Delete(root);
 
+    char plant_esc[128];
     char reason_esc[256];
     char alert_esc[320];
     char ai_reply_esc[320];
+    json_escape_text(g_monitor_plant, plant_esc, sizeof(plant_esc));
     json_escape_text(g_control_state.reason, reason_esc, sizeof(reason_esc));
     json_escape_text(g_last_alert, alert_esc, sizeof(alert_esc));
     json_escape_text(g_last_ai_reply, ai_reply_esc, sizeof(ai_reply_esc));
     char resp[1024];
     snprintf(resp, sizeof(resp),
-             "{\"ok\":true,\"mode\":\"%s\",\"fan\":%u,\"pump\":%u,\"servo\":%u,"
-             "\"reason\":\"%s\",\"alert\":\"%s\",\"ai_reply\":\"%s\"}",
+             "{\"ok\":true,\"mode\":\"%s\",\"fan\":%u,\"pump\":%u,\"servo\":%u,\"light\":%u,"
+             "\"reason\":\"%.180s\",\"alert\":\"%.220s\",\"ai_reply\":\"%.220s\"}",
              g_control_mode == CONTROL_MODE_SMART ? "smart" : "manual",
              g_control_state.fan_speed,
              g_control_state.pump_speed,
              g_control_state.servo_angle,
+             g_control_state.light_level,
              reason_esc,
              alert_esc,
              ai_reply_esc);
@@ -584,6 +874,7 @@ static esp_err_t api_history_handler(httpd_req_t *req)
 static httpd_handle_t start_webserver(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.stack_size = 8192;
     config.max_uri_handlers = 12;
     httpd_handle_t server = NULL;
 
@@ -602,12 +893,26 @@ static httpd_handle_t start_webserver(void)
         };
         httpd_register_uri_handler(server, &api_uri);
 
+        httpd_uri_t api_options_uri = {
+            .uri       = "/api/data",
+            .method    = HTTP_OPTIONS,
+            .handler   = api_options_handler,
+        };
+        httpd_register_uri_handler(server, &api_options_uri);
+
         httpd_uri_t history_uri = {
             .uri       = "/api/history",
             .method    = HTTP_GET,
             .handler   = api_history_handler,
         };
         httpd_register_uri_handler(server, &history_uri);
+
+        httpd_uri_t history_options_uri = {
+            .uri       = "/api/history",
+            .method    = HTTP_OPTIONS,
+            .handler   = api_options_handler,
+        };
+        httpd_register_uri_handler(server, &history_options_uri);
 
         httpd_uri_t control_get_uri = {
             .uri       = "/api/control",
@@ -616,12 +921,33 @@ static httpd_handle_t start_webserver(void)
         };
         httpd_register_uri_handler(server, &control_get_uri);
 
+        httpd_uri_t control_options_uri = {
+            .uri       = "/api/control",
+            .method    = HTTP_OPTIONS,
+            .handler   = api_options_handler,
+        };
+        httpd_register_uri_handler(server, &control_options_uri);
+
         httpd_uri_t control_post_uri = {
             .uri       = "/api/control",
             .method    = HTTP_POST,
             .handler   = api_control_post_handler,
         };
         httpd_register_uri_handler(server, &control_post_uri);
+
+        httpd_uri_t plant_options_uri = {
+            .uri       = "/api/plant",
+            .method    = HTTP_OPTIONS,
+            .handler   = api_options_handler,
+        };
+        httpd_register_uri_handler(server, &plant_options_uri);
+
+        httpd_uri_t plant_post_uri = {
+            .uri       = "/api/plant",
+            .method    = HTTP_POST,
+            .handler   = api_plant_post_handler,
+        };
+        httpd_register_uri_handler(server, &plant_post_uri);
 
         ESP_LOGI(TAG, "HTTP 服务器已启动");
     }
@@ -700,6 +1026,84 @@ static int onenet_gen_token(char *out, size_t out_size)
 
 /* OneNet 回复 topic */
 #define ONENET_TOPIC_REPLY  ONENET_TOPIC_POST "/reply"
+#define ONENET_TOPIC_SET_REPLY  ONENET_TOPIC_SET "/reply"  /* 控制指令回复 */
+
+/* 处理远程控制指令 */
+static void handle_remote_control(const char *data, int len)
+{
+    if (data == NULL || len <= 0) return;
+    
+    /* 解析 OneNET 下发格式: {"id":"xxx","version":"1.0","params":{"fan":{"value":50},...}} */
+    cJSON *root = cJSON_ParseWithLength(data, len);
+    if (root == NULL) {
+        ESP_LOGW(TAG, "远程控制: JSON 解析失败");
+        return;
+    }
+    
+    cJSON *params = cJSON_GetObjectItem(root, "params");
+    if (params == NULL) {
+        cJSON_Delete(root);
+        return;
+    }
+    
+    int fan = -1, pump = -1, servo = -1, light = -1;
+    const char *mode_str = NULL;
+    
+    /* 解析控制参数 */
+    cJSON *fan_obj = cJSON_GetObjectItem(params, "fan");
+    if (fan_obj) {
+        cJSON *val = cJSON_GetObjectItem(fan_obj, "value");
+        if (val && cJSON_IsNumber(val)) fan = val->valueint;
+    }
+    
+    cJSON *pump_obj = cJSON_GetObjectItem(params, "pump");
+    if (pump_obj) {
+        cJSON *val = cJSON_GetObjectItem(pump_obj, "value");
+        if (val && cJSON_IsNumber(val)) pump = val->valueint;
+    }
+    
+    cJSON *servo_obj = cJSON_GetObjectItem(params, "servo");
+    if (servo_obj) {
+        cJSON *val = cJSON_GetObjectItem(servo_obj, "value");
+        if (val && cJSON_IsNumber(val)) servo = val->valueint;
+    }
+    
+    cJSON *light_obj = cJSON_GetObjectItem(params, "light");
+    if (light_obj) {
+        cJSON *val = cJSON_GetObjectItem(light_obj, "value");
+        if (val && cJSON_IsNumber(val)) light = val->valueint;
+    }
+    
+    cJSON *mode_obj = cJSON_GetObjectItem(params, "mode");
+    if (mode_obj) {
+        cJSON *val = cJSON_GetObjectItem(mode_obj, "value");
+        if (val && cJSON_IsString(val)) mode_str = val->valuestring;
+    }
+    
+    /* 切换模式 */
+    if (mode_str != NULL) {
+        if (strcmp(mode_str, "smart") == 0) {
+            g_control_mode = CONTROL_MODE_SMART;
+            ESP_LOGI(TAG, "远程切换: 智能模式");
+        } else if (strcmp(mode_str, "manual") == 0) {
+            g_control_mode = CONTROL_MODE_MANUAL;
+            ESP_LOGI(TAG, "远程切换: 手动模式");
+        }
+    }
+    
+    /* 手动模式下执行控制 */
+    if (g_control_mode == CONTROL_MODE_MANUAL && (fan >= 0 || pump >= 0 || servo >= 0 || light >= 0)) {
+        if (fan < 0) fan = g_control_state.fan_speed;
+        if (pump < 0) pump = g_control_state.pump_speed;
+        if (servo < 0) servo = g_control_state.servo_angle;
+        if (light < 0) light = g_control_state.light_level;
+        
+        apply_control_and_send(CONTROL_MODE_MANUAL, fan, pump, servo, light, "remote mqtt");
+        ESP_LOGI(TAG, "远程控制: fan=%d pump=%d servo=%d light=%d", fan, pump, servo, light);
+    }
+    
+    cJSON_Delete(root);
+}
 
 static void mqtt_event_handler(void *arg, esp_event_base_t base,
                                 int32_t event_id, void *event_data)
@@ -710,9 +1114,12 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         ESP_LOGI(TAG, "MQTT 已连接 OneNet");
         mqtt_connected = true;
         mqtt_pending_send = true;  /* 重连后立即补发 */
-        /* 订阅回复 topic，查看平台是否接受数据 */
+        /* 订阅回复 topic */
         esp_mqtt_client_subscribe(mqtt_client, ONENET_TOPIC_REPLY, 0);
         ESP_LOGI(TAG, "已订阅: %s", ONENET_TOPIC_REPLY);
+        /* 订阅远程控制 topic */
+        esp_mqtt_client_subscribe(mqtt_client, ONENET_TOPIC_SET, 0);
+        ESP_LOGI(TAG, "已订阅: %s", ONENET_TOPIC_SET);
         break;
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "MQTT 连接断开");
@@ -722,8 +1129,12 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         ESP_LOGI(TAG, "MQTT 消息已送达 broker, msg_id=%d", event->msg_id);
         break;
     case MQTT_EVENT_DATA:
-        ESP_LOGI(TAG, "MQTT 收到回复 topic=%.*s", event->topic_len, event->topic);
-        ESP_LOGI(TAG, "MQTT 回复内容=%.*s", event->data_len, event->data);
+        ESP_LOGI(TAG, "MQTT 收到消息 topic=%.*s", event->topic_len, event->topic);
+        ESP_LOGI(TAG, "MQTT 消息内容=%.*s", event->data_len, event->data);
+        /* 处理远程控制指令 */
+        if (event->topic_len > 0 && strstr(event->topic, "/property/set") != NULL) {
+            handle_remote_control(event->data, event->data_len);
+        }
         break;
     case MQTT_EVENT_ERROR: {
         if (event->error_handle->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT) {
@@ -1008,6 +1419,9 @@ static void lora_rx_task(void *arg)
     uint8_t buf[FRAME_TOTAL_LEN];
     int state = 0;   /* 0: 找AA 1: 找55 2: 收剩余 */
     int idx = 0;
+    uint8_t ack_buf[CONTROL_FRAME_LEN];
+    int ack_state = 0; /* 0:找5A 1:找A5 2:收剩余 */
+    int ack_idx = 0;
     TickType_t last_report_tick = xTaskGetTickCount();
     uint32_t last_rx_bytes = 0;
     uint32_t last_aux_low_count = 0;
@@ -1059,6 +1473,32 @@ static void lora_rx_task(void *arg)
         }
         rx_bytes += (uint32_t)n;
 
+        /* STM32 控制ACK解析状态机（与传感器帧并行） */
+        if (ack_state == 0) {
+            if (b == CONTROL_ACK_HEAD1) {
+                ack_buf[0] = b;
+                ack_state = 1;
+            }
+        } else if (ack_state == 1) {
+            if (b == CONTROL_ACK_HEAD2) {
+                ack_buf[1] = b;
+                ack_idx = 2;
+                ack_state = 2;
+            } else if (b == CONTROL_ACK_HEAD1) {
+                ack_buf[0] = b;
+                ack_state = 1;
+            } else {
+                ack_state = 0;
+            }
+        } else {
+            ack_buf[ack_idx++] = b;
+            if (ack_idx >= CONTROL_FRAME_LEN) {
+                (void)parse_control_ack_frame(ack_buf);
+                ack_state = 0;
+                ack_idx = 0;
+            }
+        }
+
         if (state == 0) {
             if (b == FRAME_HEAD1) {
                 buf[0] = b;
@@ -1086,9 +1526,6 @@ static void lora_rx_task(void *arg)
                     latest_pkt = pkt;
                     has_data = true;
                     history_push(&pkt);
-                    if (g_control_mode == CONTROL_MODE_SMART) {
-                        g_smart_control_force_run = true;
-                    }
                     /* 实时刷新显示屏 */
                     {
                         display_sensor_data_t dd = {
@@ -1104,8 +1541,25 @@ static void lora_rx_task(void *arg)
                         char alert[64] = "";
                         check_alerts(&pkt, alert, sizeof(alert));
                         snprintf(g_last_alert, sizeof(g_last_alert), "%s", alert);
-                        lcd_update(&dd, true, PLANT_SPECIES_EN,
+                        lcd_update(&dd, true, g_monitor_plant,
                                    mqtt_connected, mqtt_connected, alert);
+
+                        /* 智能模式下，若环境恢复正常，自动发送停机指令 */
+                        if (g_control_mode == CONTROL_MODE_SMART) {
+                            bool is_alert = (alert[0] != '\0');
+                            if (is_alert) {
+                                g_auto_stop_sent = false;
+                            } else if (!g_auto_stop_sent &&
+                                       (g_control_state.fan_speed > 0 ||
+                                        g_control_state.pump_speed > 0 ||
+                                        g_control_state.servo_angle != 90 ||
+                                        g_control_state.light_level > 0)) {
+                                apply_control_and_send(CONTROL_MODE_SMART, 0, 0, 90, 0,
+                                                       "auto stop by normal data");
+                                g_auto_stop_sent = true;
+                                ESP_LOGI(TAG, "环境恢复正常，已下发自动停机指令");
+                            }
+                        }
                     }
                 } else {
                     fail_count++;
@@ -1122,9 +1576,181 @@ static void lora_rx_task(void *arg)
 
 /* ====== AI 语音播报 ====== */
 static max98357a_handle_t *g_audio_handle = NULL;
-static spark_chat_client_t g_spark = {0};
-static spark_chat_client_t g_smart_ctrl = {0};
+static doubao_chat_client_t g_doubao = {0};
+static doubao_chat_client_t g_smart_ctrl = {0};
 static baidu_tts_handle_t  g_tts = {0};
+static SemaphoreHandle_t g_ai_lock = NULL;
+static bool g_ai_clients_ready = false;
+static volatile bool g_tts_playing = false;
+static volatile bool g_alert_control_hold = false;
+
+static bool ai_lock_take(TickType_t timeout_ticks)
+{
+    if (g_ai_lock == NULL) {
+        return false;
+    }
+    return xSemaphoreTake(g_ai_lock, timeout_ticks) == pdTRUE;
+}
+
+static void ai_lock_give(void)
+{
+    if (g_ai_lock) {
+        xSemaphoreGive(g_ai_lock);
+    }
+}
+
+static void reset_ai_prompts_locked(void)
+{
+    char ai_sys_prompt[512];
+    char ctrl_sys_prompt[512];
+
+    doubao_chat_clear_history(&g_doubao);
+    doubao_chat_clear_history(&g_smart_ctrl);
+
+    snprintf(ctrl_sys_prompt, sizeof(ctrl_sys_prompt),
+        "温室控制助手。只输出JSON:{\"fan\":0-100,\"pump\":0-100,\"servo\":0-180,\"light\":0-100,\"reason\":\"...\"}。"
+        "高温/强光增风扇,土壤干增水泵,土壤湿减水泵,低光照增补光灯。");
+    doubao_chat_add_message(&g_smart_ctrl, "system", ctrl_sys_prompt);
+
+    snprintf(ai_sys_prompt, sizeof(ai_sys_prompt),
+        "你是%s种植智慧农业助手。监测对象是%s。"
+        "请联网搜索%s的最佳种植条件，"
+        "根据搜索结果直接分析传感器数据。"
+        "如有异常给出针对%s的建议。"
+        "回答极简，不超过50字，不要客套。",
+        g_monitor_plant, g_monitor_plant, g_monitor_plant, g_monitor_plant);
+    doubao_chat_add_message(&g_doubao, "system", ai_sys_prompt);
+}
+
+static esp_err_t api_plant_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > 256) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid content len");
+        return ESP_FAIL;
+    }
+
+    char body[280] = {0};
+    int received = httpd_req_recv(req, body, req->content_len);
+    if (received <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+        return ESP_FAIL;
+    }
+    body[received] = '\0';
+
+    cJSON *root = cJSON_Parse(body);
+    if (root == NULL) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "json parse failed");
+        return ESP_FAIL;
+    }
+
+    const cJSON *plant_j = cJSON_GetObjectItem(root, "plant");
+    if (!(plant_j && cJSON_IsString(plant_j) && plant_j->valuestring)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "plant required");
+        return ESP_FAIL;
+    }
+
+    char new_plant[sizeof(g_monitor_plant)] = {0};
+    snprintf(new_plant, sizeof(new_plant), "%s", plant_j->valuestring);
+    trim_text_inplace(new_plant);
+    if (new_plant[0] == '\0') {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "plant empty");
+        return ESP_FAIL;
+    }
+
+    bool changed = (strcmp(g_monitor_plant, new_plant) != 0);
+    if (changed) {
+        snprintf(g_monitor_plant, sizeof(g_monitor_plant), "%s", new_plant);
+
+        if (g_ai_clients_ready && ai_lock_take(pdMS_TO_TICKS(3000))) {
+            reset_ai_prompts_locked();
+            ai_lock_give();
+        }
+
+        apply_control_and_send(g_control_mode, 0, 0, 90, 0, "plant switch stop");
+        g_smart_control_force_run = true;
+        ESP_LOGI(TAG, "监控对象已切换: %s，已清零并触发智能调节", g_monitor_plant);
+    }
+
+    cJSON_Delete(root);
+
+    char plant_esc[128];
+    char reason_esc[256];
+    char alert_esc[320];
+    char ai_reply_esc[320];
+    json_escape_text(g_monitor_plant, plant_esc, sizeof(plant_esc));
+    json_escape_text(g_control_state.reason, reason_esc, sizeof(reason_esc));
+    json_escape_text(g_last_alert, alert_esc, sizeof(alert_esc));
+    json_escape_text(g_last_ai_reply, ai_reply_esc, sizeof(ai_reply_esc));
+    char resp[1024];
+    snprintf(resp, sizeof(resp),
+             "{\"ok\":true,\"changed\":%s,\"plant\":\"%s\",\"mode\":\"%s\","
+             "\"fan\":%u,\"pump\":%u,\"servo\":%u,\"light\":%u,\"updated\":%lu,"
+             "\"reason\":\"%.180s\",\"alert\":\"%.220s\",\"ai_reply\":\"%.220s\"}",
+             changed ? "true" : "false",
+             plant_esc,
+             g_control_mode == CONTROL_MODE_SMART ? "smart" : "manual",
+             g_control_state.fan_speed,
+             g_control_state.pump_speed,
+             g_control_state.servo_angle,
+             g_control_state.light_level,
+             (unsigned long)g_control_state.update_time_s,
+             reason_esc,
+             alert_esc,
+             ai_reply_esc);
+    set_cors_headers(req);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, resp, strlen(resp));
+    return ESP_OK;
+}
+
+#if AUDIO_SELF_TEST_ON_BOOT
+static void audio_self_test_beep(void)
+{
+    if (g_audio_handle == NULL) {
+        ESP_LOGW(TAG, "音频自检跳过: g_audio_handle 为空");
+        return;
+    }
+
+    const int sample_rate = 16000;
+    const int duration_ms = 180;
+    const int freq_hz = 1000;
+    const int total_samples = (sample_rate * duration_ms) / 1000;
+    const int chunk_samples = 256;
+    int16_t pcm[chunk_samples * 2];
+    int phase = 0;
+
+    ESP_LOGI(TAG, "开始音频自检蜂鸣");
+    for (int written_samples = 0; written_samples < total_samples; ) {
+        int cur = total_samples - written_samples;
+        if (cur > chunk_samples) {
+            cur = chunk_samples;
+        }
+
+        for (int i = 0; i < cur; i++) {
+            int period = sample_rate / freq_hz;
+            int16_t v = (phase < (period / 2)) ? 6000 : -6000;
+            pcm[i * 2] = v;
+            pcm[i * 2 + 1] = v;
+            phase++;
+            if (phase >= period) {
+                phase = 0;
+            }
+        }
+
+        size_t bytes = (size_t)cur * 2U * sizeof(int16_t);
+        size_t out = 0;
+        esp_err_t ret = max98357a_write(g_audio_handle, pcm, bytes, &out, 1000);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "音频自检写入失败: %s", esp_err_to_name(ret));
+            return;
+        }
+        written_samples += cur;
+    }
+    ESP_LOGI(TAG, "音频自检蜂鸣完成");
+}
+#endif
 
 /* ====== 异常告警阈值（通用基础值，AI会根据品种联网搜索后细化判断） ====== */
 #define ALERT_TEMP_HIGH      40.0f   /* 高温上限 ℃ */
@@ -1142,9 +1768,9 @@ static baidu_tts_handle_t  g_tts = {0};
 #define ALERT_REPORT_INTERVAL_S    60   /* 异常时1分钟播报一次 */
 #define SMART_CONTROL_INTERVAL_S   30    /* 智能控制评估周期 */
 
-static bool parse_control_json_from_text(const char *text, int *fan, int *pump, int *servo, char *reason, size_t reason_size)
+static bool parse_control_json_from_text(const char *text, int *fan, int *pump, int *servo, int *light, char *reason, size_t reason_size)
 {
-    if (!text || !fan || !pump || !servo) {
+    if (!text || !fan || !pump || !servo || !light) {
         return false;
     }
 
@@ -1170,6 +1796,7 @@ static bool parse_control_json_from_text(const char *text, int *fan, int *pump, 
     const cJSON *fan_j = cJSON_GetObjectItem(root, "fan");
     const cJSON *pump_j = cJSON_GetObjectItem(root, "pump");
     const cJSON *servo_j = cJSON_GetObjectItem(root, "servo");
+    const cJSON *light_j = cJSON_GetObjectItem(root, "light");
     const cJSON *reason_j = cJSON_GetObjectItem(root, "reason");
 
     bool ok = fan_j && cJSON_IsNumber(fan_j)
@@ -1180,6 +1807,7 @@ static bool parse_control_json_from_text(const char *text, int *fan, int *pump, 
         *fan = fan_j->valueint;
         *pump = pump_j->valueint;
         *servo = servo_j->valueint;
+        *light = (light_j && cJSON_IsNumber(light_j)) ? light_j->valueint : 0;
         if (reason && reason_size > 0) {
             if (reason_j && cJSON_IsString(reason_j) && reason_j->valuestring) {
                 snprintf(reason, reason_size, "%s", reason_j->valuestring);
@@ -1195,17 +1823,95 @@ static bool parse_control_json_from_text(const char *text, int *fan, int *pump, 
 
 static void build_smart_control_prompt(char *buf, size_t size)
 {
+    // 极简 prompt，减少 token 数以避免 API 500 错误
     snprintf(buf, size,
-        "你是%s温室控制器。根据当前数据直接给出执行器控制量。"
-        "输出必须是纯JSON，且只有这些字段："
-        "{\"fan\":0-100,\"pump\":0-100,\"servo\":0-180,\"reason\":\"<=20字\"}。"
-        "不要输出markdown和多余文本。"
-        "当前数据: 光照%.0f lx, 环境温度%.1f℃, 环境湿度%.0f%%, 土壤温度%.1f℃, 土壤湿度%.0f%%, pH%.2f, N%u, P%u, K%u。"
-        "控制逻辑示例: 高温或强光可增大风扇并调整舵机遮阳; 土壤偏干提高水泵。",
-        PLANT_SPECIES,
+    "传感器:光%.0flx,气温%.1f℃,湿%.0f%%,土温%.1f℃,土湿%.0f%%,pH%.1f,N%u P%u K%u。"
+    "执行器:fan=%u,pump=%u,servo=%u,light=%u。告警:%s。"
+    "输出JSON:{\"fan\":0-100,\"pump\":0-100,\"servo\":0-180,\"light\":0-100,\"reason\":\"...\"}",
         latest_pkt.lux, latest_pkt.env_temp_c, latest_pkt.env_humi_pct,
         latest_pkt.soil_temp_c, latest_pkt.soil_humi_pct, latest_pkt.ph,
-        latest_pkt.n, latest_pkt.p, latest_pkt.k);
+        latest_pkt.n, latest_pkt.p, latest_pkt.k,
+        g_control_state.fan_speed, g_control_state.pump_speed, g_control_state.servo_angle,
+        g_control_state.light_level,
+        g_last_alert[0] ? g_last_alert : "无");
+}
+
+static void build_fallback_control(const sensor_packet_t *pkt,
+                                   int *fan, int *pump, int *servo, int *light,
+                                   char *reason, size_t reason_size)
+{
+    int f = 20;
+    int p = 0;
+    int s = 90;
+    int l = 0;
+
+    if (pkt->env_temp_c >= 32.0f || pkt->lux >= 60000.0f) {
+        f = 80;
+        s = 130;
+    } else if (pkt->env_temp_c >= 28.0f || pkt->lux >= 30000.0f) {
+        f = 55;
+        s = 110;
+    }
+
+    if (pkt->soil_humi_pct <= 15.0f) {
+        p = 85;
+    } else if (pkt->soil_humi_pct <= 30.0f) {
+        p = 45;
+    } else if (pkt->soil_humi_pct >= 80.0f) {
+        p = 0;
+    }
+
+    /* 光照不足时自动补光 */
+    if (pkt->lux < 500.0f) {
+        l = 80;
+    } else if (pkt->lux < 2000.0f) {
+        l = 50;
+    } else if (pkt->lux < 5000.0f) {
+        l = 20;
+    }
+
+    *fan = f;
+    *pump = p;
+    *servo = s;
+    *light = l;
+    if (reason && reason_size > 0) {
+        snprintf(reason, reason_size, "fallback by sensor");
+    }
+}
+
+static void enforce_sensor_safety_control(const sensor_packet_t *pkt,
+                                          int *fan, int *pump, int *servo, int *light,
+                                          char *reason, size_t reason_size)
+{
+    if (!pkt || !fan || !pump || !servo || !light) {
+        return;
+    }
+
+    // 安全硬规则：土壤极干必须开泵，土壤过湿必须停泵，防止AI误判。
+    if (pkt->soil_humi_pct <= 15.0f) {
+        if (*pump < 60) {
+            *pump = 60;
+        }
+        if (reason && reason_size > 0) {
+            snprintf(reason, reason_size, "safety: dry soil pump>=60");
+        }
+    } else if (pkt->soil_humi_pct >= 80.0f) {
+        if (*pump != 0) {
+            *pump = 0;
+        }
+        if (reason && reason_size > 0) {
+            snprintf(reason, reason_size, "safety: wet soil pump=0");
+        }
+    }
+
+    if (*fan < 0) *fan = 0;
+    if (*fan > 100) *fan = 100;
+    if (*pump < 0) *pump = 0;
+    if (*pump > 100) *pump = 100;
+    if (*servo < 0) *servo = 0;
+    if (*servo > 180) *servo = 180;
+    if (*light < 0) *light = 0;
+    if (*light > 100) *light = 100;
 }
 
 /* 检测数据是否异常，返回告警描述(空字符串=正常) */
@@ -1279,36 +1985,26 @@ static void ai_audio_init(void)
 
     /* 初始化豆包大模型 */
     ESP_LOGI(TAG, "初始化 AI 大模型...");
-    spark_chat_config_t spark_cfg = {
+    doubao_chat_config_t doubao_cfg = {
         .api_key  = AI_API_KEY,
         .url      = AI_URL,
         .user_id  = NULL,
         .model    = AI_MODEL,
         .timeout_ms = 30000,
-        .stream   = true,
-        .enable_web_search = true,
-        .search_mode = "auto",
+        .stream   = false,  // doubao-seed-1-6-lite 不支持流式
+        .enable_web_search = false,
+        .search_mode = NULL,
     };
-    spark_chat_init(&g_spark, &spark_cfg);
+    doubao_chat_init(&g_doubao, &doubao_cfg);
 
-    spark_chat_config_t ctrl_cfg = spark_cfg;
+    doubao_chat_config_t ctrl_cfg = doubao_cfg;
     ctrl_cfg.enable_web_search = false;
-    spark_chat_init(&g_smart_ctrl, &ctrl_cfg);
-    spark_chat_add_message(&g_smart_ctrl, "system",
-        "你是温室执行器控制助手。根据实时环境数据输出JSON控制量。"
-        "禁止解释，禁止多余文本，只能输出JSON。"
-        "fan和pump范围0-100，servo范围0-180。");
-
-    /* 动态生成 system prompt：根据 PLANT_SPECIES 让 AI 联网搜索适生条件 */
-    char sys_prompt[512];
-    snprintf(sys_prompt, sizeof(sys_prompt),
-        "你是%s种植智慧农业助手。监测对象是%s。"
-        "请联网搜索%s的最佳种植条件，"
-        "根据搜索结果直接分析传感器数据。"
-        "如有异常给出针对%s的建议。"
-        "回答极简，不超过50字，不要客套。",
-        PLANT_SPECIES, PLANT_SPECIES, PLANT_SPECIES, PLANT_SPECIES);
-    spark_chat_add_message(&g_spark, "system", sys_prompt);
+    doubao_chat_init(&g_smart_ctrl, &ctrl_cfg);
+    if (ai_lock_take(pdMS_TO_TICKS(3000))) {
+        reset_ai_prompts_locked();
+        ai_lock_give();
+    }
+    g_ai_clients_ready = true;
 
     /* 初始化百度 TTS */
     ESP_LOGI(TAG, "初始化百度 TTS...");
@@ -1321,10 +2017,22 @@ static void ai_audio_init(void)
         .volume     = 15,
         .timeout_ms = 30000,
     };
-    baidu_tts_init(&g_tts, &tts_cfg, g_audio_handle);
+    ret = baidu_tts_init(&g_tts, &tts_cfg, g_audio_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "百度TTS初始化失败: %s", esp_err_to_name(ret));
+        return;
+    }
 
-    /* 放大器上电后一次性 enable，此后保持常开，避免频繁 SD_MODE 切换产生噪声 */
-    max98357a_enable(g_audio_handle);
+    /* 启动阶段避免立即拉高功放和播放自检音，降低峰值电流防止Brownout。
+     * 首次TTS播放时会通过max98357a_write自动使能功放。 */
+#if AUDIO_SELF_TEST_ON_BOOT
+    ret = max98357a_enable(g_audio_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "MAX98357A 使能失败: %s", esp_err_to_name(ret));
+        return;
+    }
+    audio_self_test_beep();
+#endif
 
     ESP_LOGI(TAG, "AI 语音播报模块初始化完成");
 }
@@ -1334,9 +2042,10 @@ static void build_sensor_prompt(char *buf, size_t size, bool is_alert, const cha
 {
     if (has_data) {
         int n = snprintf(buf, size,
-            "数据：光照%.0f lx，气温%.1f℃，湿度%.0f%%，"
+            "监测对象：%s。数据：光照%.0f lx，气温%.1f℃，湿度%.0f%%，"
             "气压%.0f，土温%.1f℃，土湿%.0f%%，"
             "pH%.1f，N%u P%u K%u mg/kg。",
+            g_monitor_plant,
             latest_pkt.lux, latest_pkt.env_temp_c, latest_pkt.env_humi_pct,
             latest_pkt.press_kpa, latest_pkt.soil_temp_c, latest_pkt.soil_humi_pct,
             latest_pkt.ph, latest_pkt.n, latest_pkt.p, latest_pkt.k);
@@ -1361,13 +2070,15 @@ static void ai_report_task(void *arg)
     /* 上电自我介绍 */
     ESP_LOGI(TAG, "===== 播放自我介绍 =====");
     {
-        char intro[128];
+        char intro[384];
         snprintf(intro, sizeof(intro),
             "%s智慧监测系统已启动，开始为您实时分析环境数据。",
-            PLANT_SPECIES);
+            g_monitor_plant);
         esp_err_t intro_ret = ESP_FAIL;
         for (int i = 0; i < 3; i++) {
+            g_tts_playing = true;
             intro_ret = baidu_tts_speak(&g_tts, intro);
+            g_tts_playing = false;
             if (intro_ret == ESP_OK) {
                 break;
             }
@@ -1415,6 +2126,11 @@ static void ai_report_task(void *arg)
             continue;
         }
 
+        if (is_alert) {
+            // 异常流程中先暂停智能调节，待告警语音播报完成后再放行
+            g_alert_control_hold = true;
+        }
+
         normal_elapsed_s = 0;  /* 重置计时 */
 
         ESP_LOGI(TAG, "===== AI 语音播报开始 (异常=%d) =====", is_alert);
@@ -1426,34 +2142,53 @@ static void ai_report_task(void *arg)
         ESP_LOGI(TAG, "AI 提示词: %s", prompt);
 
         /* 2) 发送给大模型 */
-        spark_chat_add_message(&g_spark, "user", prompt);
-        spark_chat_trim_history(&g_spark);
+        bool ok = false;
+        char response_local[512] = {0};
+        if (g_ai_clients_ready && ai_lock_take(pdMS_TO_TICKS(30000))) {
+            doubao_chat_add_message(&g_doubao, "user", prompt);
+            doubao_chat_trim_history(&g_doubao);
 
-        bool ok = spark_chat_request(&g_spark);
-        /* 每次请求后释放HTTP连接，避免复用过期连接导致下次收不到数据 */
-        spark_chat_close_connection(&g_spark);
+            ok = doubao_chat_request(&g_doubao);
+            /* 每次请求后释放HTTP连接，避免复用过期连接导致下次收不到数据 */
+            doubao_chat_close_connection(&g_doubao);
+
+            if (ok) {
+                const char *response = doubao_chat_get_last_response(&g_doubao);
+                snprintf(response_local, sizeof(response_local), "%s", response ? response : "");
+                doubao_chat_add_message(&g_doubao, "assistant", response_local);
+            }
+            ai_lock_give();
+        }
 
         if (ok) {
-            const char *response = spark_chat_get_last_response(&g_spark);
-            ESP_LOGI(TAG, "AI 回复: %s", response);
-            snprintf(g_last_ai_reply, sizeof(g_last_ai_reply), "%s", response ? response : "");
-
-            /* 把 AI 回复加入对话历史 */
-            spark_chat_add_message(&g_spark, "assistant", response);
+            ESP_LOGI(TAG, "AI 回复: %s", response_local);
+            snprintf(g_last_ai_reply, sizeof(g_last_ai_reply), "%.255s", response_local);
 
             /* 3) TTS 语音播放 */
-            if (strlen(response) > 0) {
+            if (strlen(response_local) > 0) {
                 ESP_LOGI(TAG, "TTS 播放中...");
-                esp_err_t ret = baidu_tts_speak(&g_tts, response);
+                g_tts_playing = true;
+                esp_err_t ret = baidu_tts_speak(&g_tts, response_local);
+                g_tts_playing = false;
                 if (ret != ESP_OK) {
                     ESP_LOGW(TAG, "TTS 播放失败: %s", esp_err_to_name(ret));
                 }
             } else {
                 ESP_LOGW(TAG, "AI 回复为空，跳过TTS");
             }
+
+            if (is_alert && g_control_mode == CONTROL_MODE_SMART) {
+                // 异常场景：必须在语音播报结束后再触发智能调节
+                g_smart_control_force_run = true;
+                ESP_LOGI(TAG, "异常播报已完成，开始触发智能调节");
+            }
         } else {
             ESP_LOGW(TAG, "AI 请求失败");
             snprintf(g_last_ai_reply, sizeof(g_last_ai_reply), "%s", "");
+        }
+
+        if (is_alert) {
+            g_alert_control_hold = false;
         }
 
         int next = is_alert ? ALERT_REPORT_INTERVAL_S : NORMAL_REPORT_INTERVAL_S;
@@ -1470,12 +2205,17 @@ static void ai_smart_control_task(void *arg)
 {
     vTaskDelay(pdMS_TO_TICKS(12000));
     uint32_t last_run_s = 0;
+    uint32_t consecutive_ai_fail = 0;
 
     while (1) {
         uint32_t now_s = (uint32_t)(esp_timer_get_time() / 1000000ULL);
         bool interval_due = (now_s - last_run_s) >= SMART_CONTROL_INTERVAL_S;
 
         if (!has_data || g_control_mode != CONTROL_MODE_SMART) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        if (g_tts_playing || g_alert_control_hold) {
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
@@ -1490,27 +2230,57 @@ static void ai_smart_control_task(void *arg)
         char prompt[640];
         build_smart_control_prompt(prompt, sizeof(prompt));
 
-        spark_chat_add_message(&g_smart_ctrl, "user", prompt);
-        spark_chat_trim_history(&g_smart_ctrl);
+        bool ok = false;
+        const int max_retry = 3;
+        char resp_local[512] = {0};
+        if (g_ai_clients_ready && ai_lock_take(pdMS_TO_TICKS(30000))) {
+            doubao_chat_add_message(&g_smart_ctrl, "user", prompt);
+            doubao_chat_trim_history(&g_smart_ctrl);
 
-        bool ok = spark_chat_request(&g_smart_ctrl);
-        spark_chat_close_connection(&g_smart_ctrl);
+            for (int i = 0; i < max_retry; i++) {
+                ok = doubao_chat_request(&g_smart_ctrl);
+                doubao_chat_close_connection(&g_smart_ctrl);
+                if (ok) {
+                    const char *resp = doubao_chat_get_last_response(&g_smart_ctrl);
+                    snprintf(resp_local, sizeof(resp_local), "%s", resp ? resp : "");
+                    break;
+                }
+                ESP_LOGW(TAG, "智能控制AI请求失败，重试 %d/%d", i + 1, max_retry);
+                if (i < max_retry - 1) {
+                    vTaskDelay(pdMS_TO_TICKS((i + 1) * 1000));
+                }
+            }
+            ai_lock_give();
+        }
 
         if (!ok) {
-            ESP_LOGW(TAG, "智能控制AI请求失败");
-            vTaskDelay(pdMS_TO_TICKS(SMART_CONTROL_INTERVAL_S * 1000));
+            consecutive_ai_fail++;
+            ESP_LOGW(TAG, "智能控制AI请求失败，连续失败=%lu", (unsigned long)consecutive_ai_fail);
+
+            // 本轮AI请求失败即启用本地降级控制，避免土壤极干时迟迟不开泵。
+            int fan = 0, pump = 0, servo = 90, light = 0;
+            char reason[96] = "fallback by sensor";
+            build_fallback_control(&latest_pkt, &fan, &pump, &servo, &light, reason, sizeof(reason));
+            enforce_sensor_safety_control(&latest_pkt, &fan, &pump, &servo, &light, reason, sizeof(reason));
+            apply_control_and_send(CONTROL_MODE_SMART, fan, pump, servo, light, reason);
+            ESP_LOGW(TAG, "AI请求失败，启用本地降级控制 fan=%d pump=%d servo=%d light=%d", fan, pump, servo, light);
+
+            // 失败后短暂退避，避免长时间阻塞导致异常播报后的控制响应变慢
+            vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
 
-        const char *resp = spark_chat_get_last_response(&g_smart_ctrl);
-        int fan = 0, pump = 0, servo = 90;
+        consecutive_ai_fail = 0;
+
+        int fan = 0, pump = 0, servo = 90, light = 0;
         char reason[96] = "smart adjust";
 
-        if (parse_control_json_from_text(resp, &fan, &pump, &servo, reason, sizeof(reason))) {
-            apply_control_and_send(CONTROL_MODE_SMART, fan, pump, servo, reason);
-            ESP_LOGI(TAG, "智能控制生效 fan=%d pump=%d servo=%d reason=%s", fan, pump, servo, reason);
+        if (parse_control_json_from_text(resp_local, &fan, &pump, &servo, &light, reason, sizeof(reason))) {
+            enforce_sensor_safety_control(&latest_pkt, &fan, &pump, &servo, &light, reason, sizeof(reason));
+            apply_control_and_send(CONTROL_MODE_SMART, fan, pump, servo, light, reason);
+            ESP_LOGI(TAG, "智能控制生效 fan=%d pump=%d servo=%d light=%d reason=%s", fan, pump, servo, light, reason);
         } else {
-            ESP_LOGW(TAG, "智能控制解析失败: %s", resp ? resp : "(null)");
+            ESP_LOGW(TAG, "智能控制解析失败: %s", resp_local[0] ? resp_local : "(null)");
         }
     }
 }
@@ -1525,10 +2295,23 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
+    init_mbedtls_allocator();
+
+    g_ai_lock = xSemaphoreCreateMutex();
+    if (!g_ai_lock) {
+        ESP_LOGE(TAG, "创建AI互斥锁失败");
+    }
+
     /* 先初始化 LoRa 接收硬件 */
     a39c_mode_init();
     uart_init_a39c();
     a39c_diag_dump_config();
+
+    /* 上电默认进入智能模式，并先下发一次全关指令，确保执行器安全状态 */
+    g_control_mode = CONTROL_MODE_SMART;
+    apply_control_and_send(CONTROL_MODE_SMART, 0, 0, 90, 0, "boot safe stop");
+    g_smart_control_force_run = true;
+    ESP_LOGI(TAG, "上电默认智能模式，已下发执行器全关指令");
 
     /* 启动 WiFi STA（连接路由器） */
     wifi_init_sta();
@@ -1546,12 +2329,13 @@ void app_main(void)
 
     /* 初始化 ST7735S 显示屏（须在 LoRa 任务之前，否则 lcd_update 使用未初始化的 SPI） */
     if (lcd_init() == ESP_OK) {
-        lcd_update(NULL, false, PLANT_SPECIES_EN, false, false, "");
+        lcd_update(NULL, false, g_monitor_plant, false, false, "");
     }
 
     /* 在独立任务中运行 LoRa 接收循环 */
     ESP_LOGI(TAG, "空闲堆内存: %lu bytes", (unsigned long)esp_get_free_heap_size());
     xTaskCreate(lora_rx_task, "lora_rx", 8192, NULL, 10, NULL);
+    xTaskCreate(control_retry_task, "ctrl_retry", 4096, NULL, 8, NULL);
 
     /* 初始化 AI 语音播报并启动任务 */
     ai_audio_init();

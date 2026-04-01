@@ -5,7 +5,7 @@
 /* ====== 豆包(Ark) 大模型配置 ====== */
 #define AI_API_KEY          "Bearer 247f57b8-a974-4319-82df-5231e8d958e0"
 #define AI_URL              "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
-#define AI_MODEL            "doubao-seed-1-6-flash-250828"
+#define AI_MODEL            "ep-m-20251108165819-4j5wk"  /* Doubao-Seed-1.6-lite 接入点 */
 
 /* ====== 百度 TTS 配置 ====== */
 #define BAIDU_API_KEY       "QIZavSTgRHtRiTZZMmPnL56r"
@@ -16,7 +16,7 @@
 #define AUDIO_BCLK_PIN      GPIO_NUM_41
 #define AUDIO_LRCLK_PIN     GPIO_NUM_40
 #define AUDIO_DIN_PIN       GPIO_NUM_42
-#define AUDIO_SD_MODE_PIN   GPIO_NUM_NC    /* SD_MODE 不连接时设为 NC */
+#define AUDIO_SD_MODE_PIN   GPIO_NUM_21    /* MAX98357 SD/EN 建议避开USB脚(GPIO19/20) */
 
 /* ====== AI 语音播报间隔（秒） ====== */
 #define AI_REPORT_INTERVAL_S  60    /* 每60秒让AI分析一次传感器数据并语音播报 */

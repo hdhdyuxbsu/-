@@ -488,7 +488,7 @@ void lcd_update(const display_sensor_data_t *data,
 
     /* ── 气压 Y=100..119 (20px full-width) ── */
     lcd_fill_rect(0, 100, LCD_WIDTH, 20, COLOR_CARD_BG);
-    snprintf(buf, sizeof(buf), "%.1f kPa", data->press_kpa);
+    snprintf(buf, sizeof(buf), "%.1f kPa", data->press_kpa / 1000.0f);  /* hPa 转 kPa */
     {
         uint16_t nx = draw_cjk_label(2, 102, CP_QIYA, 2, COLOR_CYAN, COLOR_CARD_BG);
         draw_string(nx+2, 106, buf, COLOR_VALUE, COLOR_CARD_BG, 1);

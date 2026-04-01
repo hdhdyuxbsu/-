@@ -108,7 +108,7 @@ esp_err_t max98357a_init(const max98357a_config_t *config, max98357a_handle_t **
             .clk_src = I2S_CLK_SRC_DEFAULT,
             .mclk_multiple = I2S_MCLK_MULTIPLE_256, /* MCLK = 256 * sample_rate */
         },
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(config->bits_per_sample, I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
             .mclk = I2S_GPIO_UNUSED,  /* MAX98357A不需要MCLK */
             .bclk = config->bclk_pin,
@@ -144,11 +144,14 @@ esp_err_t max98357a_init(const max98357a_config_t *config, max98357a_handle_t **
     
     ESP_LOGI(TAG, "MAX98357A initialized successfully");
     ESP_LOGI(TAG, "  Sample Rate: %lu Hz", config->sample_rate);
-    ESP_LOGI(TAG, "  Bits/Sample: %d", config->bits_per_sample * 8);
+    ESP_LOGI(TAG, "  Bits/Sample: %d", (int)config->bits_per_sample);
     ESP_LOGI(TAG, "  Gain: %ddB", (config->gain * 3) + 3);
     ESP_LOGI(TAG, "  Channel: %s",
              config->channel == MAX98357A_CHANNEL_LEFT ? "Left" :
              config->channel == MAX98357A_CHANNEL_RIGHT ? "Right" : "Mixed");
+    if (config->sd_mode_pin == GPIO_NUM_NC) {
+        ESP_LOGW(TAG, "  SD_MODE pin is not connected; actual output channel depends on hardware strapping.");
+    }
     ESP_LOGI(TAG, "  DMA Buffers: %d x %d frames", chan_cfg.dma_desc_num, chan_cfg.dma_frame_num);
     
     return ESP_OK;
@@ -205,8 +208,8 @@ esp_err_t max98357a_enable(max98357a_handle_t *handle)
     if (handle->sd_mode_pin != GPIO_NUM_NC) {
         gpio_set_level(handle->sd_mode_pin, SD_MODE_ENABLE);
 
-        /* 等待启动时间(数据手册: 7.5ms典型值) */
-        vTaskDelay(pdMS_TO_TICKS(10));
+        /* 等待启动时间(数据手册: 7.5ms典型值，增加余量) */
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
     
     handle->is_enabled = true;
@@ -277,6 +280,7 @@ esp_err_t max98357a_write(max98357a_handle_t *handle,
     if (!handle->is_enabled) {
         ESP_LOGW(TAG, "Device is disabled, enabling now");
         max98357a_enable(handle);
+        vTaskDelay(pdMS_TO_TICKS(50));  /* 额外等待功放稳定 */
     }
     
     // 使用更长的超时时间

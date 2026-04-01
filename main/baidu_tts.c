@@ -534,6 +534,10 @@ static esp_err_t baidu_tts_speak_segment(baidu_tts_handle_t *handle, const char 
     if (handle == NULL || text == NULL || strlen(text) == 0) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (handle->audio_handle == NULL) {
+        ESP_LOGE(TAG, "audio_handle is NULL, cannot play TTS audio");
+        return ESP_ERR_INVALID_STATE;
+    }
 
     // 禁用流式播放，使用缓冲模式以获得更好的音质（避免噪音）
     const bool enable_streaming = false;
@@ -800,7 +804,10 @@ static esp_err_t baidu_tts_speak_segment(baidu_tts_handle_t *handle, const char 
         int16_t *pre_silence = calloc(pre_silence_size / sizeof(int16_t), sizeof(int16_t));
         if (pre_silence != NULL) {
             size_t sw = 0;
-            max98357a_write(handle->audio_handle, pre_silence, pre_silence_size, &sw, 1000);
+            esp_err_t pre_ret = max98357a_write(handle->audio_handle, pre_silence, pre_silence_size, &sw, 1000);
+            if (pre_ret != ESP_OK) {
+                ESP_LOGW(TAG, "Pre-silence write failed: %s", esp_err_to_name(pre_ret));
+            }
             free(pre_silence);
         }
     }
