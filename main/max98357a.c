@@ -22,6 +22,20 @@ static const char *TAG = "MAX98357A";
 #define SD_MODE_SHUTDOWN        0
 #define SD_MODE_ENABLE          1
 
+static void log_sd_mode_state(max98357a_handle_t *handle, int requested_level)
+{
+    if (handle == NULL || handle->sd_mode_pin == GPIO_NUM_NC) {
+        return;
+    }
+
+    int observed_level = gpio_get_level(handle->sd_mode_pin);
+    ESP_LOGI(TAG, "SD_MODE GPIO%d requested=%d observed=%d",
+             handle->sd_mode_pin, requested_level, observed_level);
+    if (observed_level != requested_level) {
+        ESP_LOGW(TAG, "SD_MODE readback mismatches requested level; external strap/load may dominate readback");
+    }
+}
+
 /**
  * @brief 获取默认配置
  */
@@ -210,6 +224,7 @@ esp_err_t max98357a_enable(max98357a_handle_t *handle)
 
         /* 等待启动时间(数据手册: 7.5ms典型值，增加余量) */
         vTaskDelay(pdMS_TO_TICKS(20));
+        log_sd_mode_state(handle, SD_MODE_ENABLE);
     }
     
     handle->is_enabled = true;
@@ -279,7 +294,11 @@ esp_err_t max98357a_write(max98357a_handle_t *handle,
     
     if (!handle->is_enabled) {
         ESP_LOGW(TAG, "Device is disabled, enabling now");
-        max98357a_enable(handle);
+        esp_err_t enable_ret = max98357a_enable(handle);
+        if (enable_ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to enable device before write: %s", esp_err_to_name(enable_ret));
+            return enable_ret;
+        }
         vTaskDelay(pdMS_TO_TICKS(50));  /* 额外等待功放稳定 */
     }
     
@@ -354,6 +373,50 @@ esp_err_t max98357a_set_sample_rate(max98357a_handle_t *handle, uint32_t sample_
     handle->sample_rate = sample_rate;
     ESP_LOGI(TAG, "Sample rate changed to %lu Hz", sample_rate);
     
+    return ESP_OK;
+}
+
+esp_err_t max98357a_prepare_output(max98357a_handle_t *handle, uint32_t sample_rate)
+{
+    ESP_RETURN_ON_FALSE(handle != NULL, ESP_ERR_INVALID_ARG, TAG, "handle is NULL");
+    ESP_RETURN_ON_FALSE(handle->tx_handle != NULL, ESP_ERR_INVALID_STATE, TAG, "tx_handle is NULL");
+    ESP_RETURN_ON_FALSE(sample_rate >= 8000 && sample_rate <= 96000,
+                        ESP_ERR_INVALID_ARG, TAG, "sample_rate out of range (8000-96000)");
+
+    ESP_LOGI(TAG, "Preparing audio output: target_sr=%lu current_sr=%lu enabled=%d",
+             sample_rate, handle->sample_rate, handle->is_enabled ? 1 : 0);
+
+    if (handle->sd_mode_pin != GPIO_NUM_NC) {
+        gpio_set_level(handle->sd_mode_pin, SD_MODE_SHUTDOWN);
+        log_sd_mode_state(handle, SD_MODE_SHUTDOWN);
+        handle->is_enabled = false;
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+
+    uint32_t previous_rate = handle->sample_rate;
+    handle->sample_rate = 0;
+    esp_err_t ret = max98357a_set_sample_rate(handle, sample_rate);
+    if (ret != ESP_OK) {
+        handle->sample_rate = previous_rate;
+        ESP_LOGE(TAG, "Failed to prepare sample rate: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = max98357a_enable(handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to enable device during prepare: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    static const int16_t s_zeros[512] = {0};
+    size_t written = 0;
+    ret = i2s_channel_write(handle->tx_handle, s_zeros, sizeof(s_zeros), &written, pdMS_TO_TICKS(100));
+    if (ret != ESP_OK && ret != ESP_ERR_TIMEOUT) {
+        ESP_LOGW(TAG, "Silent priming write failed: %s", esp_err_to_name(ret));
+    }
+
+    log_sd_mode_state(handle, SD_MODE_ENABLE);
+
     return ESP_OK;
 }
 

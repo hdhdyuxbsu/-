@@ -184,6 +184,17 @@ esp_err_t max98357a_write(max98357a_handle_t *handle,
 esp_err_t max98357a_set_sample_rate(max98357a_handle_t *handle, uint32_t sample_rate);
 
 /**
+ * @brief 播放前执行一次输出链路恢复
+ *
+ * @param handle 驱动句柄
+ * @param sample_rate 目标采样率
+ * @return
+ *     - ESP_OK: 成功
+ *     - 其他: 恢复失败
+ */
+esp_err_t max98357a_prepare_output(max98357a_handle_t *handle, uint32_t sample_rate);
+
+/**
  * @brief 获取当前状态
  * 
  * @param handle 驱动句柄

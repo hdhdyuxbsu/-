@@ -395,10 +395,12 @@ esp_err_t baidu_tts_speak(baidu_tts_handle_t *handle, const char *text) {
 
     // 获取TTS请求锁，避免并发HTTP和并发I2S播放造成爆音
     if (s_tts_request_mutex != NULL) {
+        ESP_LOGI(TAG, "Waiting for TTS mutex");
         if (xSemaphoreTake(s_tts_request_mutex, pdMS_TO_TICKS(60000)) != pdTRUE) {
             ESP_LOGE(TAG, "Failed to acquire TTS request mutex");
             return ESP_ERR_TIMEOUT;
         }
+        ESP_LOGI(TAG, "TTS mutex acquired");
     }
 
     esp_err_t final_ret = ESP_OK;
@@ -705,9 +707,11 @@ static esp_err_t baidu_tts_speak_segment(baidu_tts_handle_t *handle, const char 
 
     // I2S 播放端必须与 PCM 采样率一致，否则会造成变速/音调异常且静音清 DMA 的长度计算失真
     if (handle->audio_handle != NULL) {
-        esp_err_t sr_ret = max98357a_set_sample_rate(handle->audio_handle, 16000);
-        if (sr_ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to set I2S sample rate to 16k: %s", esp_err_to_name(sr_ret));
+        esp_err_t prep_ret = max98357a_prepare_output(handle->audio_handle, 16000);
+        if (prep_ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to prepare MAX98357A before playback: %s", esp_err_to_name(prep_ret));
+            free(audio_ctx.buffer);
+            return prep_ret;
         }
     }
 
@@ -823,6 +827,8 @@ static esp_err_t baidu_tts_speak_segment(baidu_tts_handle_t *handle, const char 
     const uint8_t *data_ptr = (const uint8_t *)stereo_buffer;
     int timeout_retry = 0;
     const int timeout_retry_max = 24;
+    int no_progress_retry = 0;
+    const int no_progress_retry_max = 8;
     
     while (total_written < stereo_size) {
         size_t remaining = stereo_size - total_written;
@@ -852,9 +858,23 @@ static esp_err_t baidu_tts_speak_segment(baidu_tts_handle_t *handle, const char 
                      total_written, stereo_size, esp_err_to_name(ret));
             break;
         }
-        
+
+        if (bytes_written == 0) {
+            no_progress_retry++;
+            ESP_LOGW(TAG, "I2S write made no progress at %d/%d bytes, retry=%d/%d",
+                     total_written, stereo_size, no_progress_retry, no_progress_retry_max);
+            if (no_progress_retry >= no_progress_retry_max) {
+                ret = ESP_ERR_TIMEOUT;
+                ESP_LOGE(TAG, "I2S write stalled without progress");
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+
         total_written += bytes_written;
         timeout_retry = 0;
+        no_progress_retry = 0;
         
         if (bytes_written < to_write) {
             ESP_LOGW(TAG, "Partial write: %d/%d bytes at offset %d",
@@ -1117,12 +1137,17 @@ esp_err_t baidu_tts_play_buffer(baidu_tts_handle_t *handle,
         return ESP_ERR_INVALID_ARG;
     }
     
-    max98357a_enable(handle->audio_handle);
+    esp_err_t prep_ret = max98357a_prepare_output(handle->audio_handle, 16000);
+    if (prep_ret != ESP_OK) {
+        return prep_ret;
+    }
     
     size_t total_written = 0;
     const size_t chunk_size = 8192;
     const uint8_t *data_ptr = (const uint8_t *)stereo_buffer;
     esp_err_t ret = ESP_OK;
+    int no_progress_retry = 0;
+    const int no_progress_retry_max = 8;
     
     while (total_written < size) {
         size_t remaining = size - total_written;
@@ -1135,7 +1160,19 @@ esp_err_t baidu_tts_play_buffer(baidu_tts_handle_t *handle,
         if (ret != ESP_OK) {
             break;
         }
+        if (bytes_written == 0) {
+            no_progress_retry++;
+            ESP_LOGW(TAG, "play_buffer no progress at %u/%u bytes, retry=%d/%d",
+                     (unsigned)total_written, (unsigned)size, no_progress_retry, no_progress_retry_max);
+            if (no_progress_retry >= no_progress_retry_max) {
+                ret = ESP_ERR_TIMEOUT;
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
         total_written += bytes_written;
+        no_progress_retry = 0;
     }
     
     return ret;

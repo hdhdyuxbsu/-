@@ -9,11 +9,11 @@ extern "C" {
 #endif
 
 #ifndef SPARK_CHAT_MAX_CHAT_HISTORY
-#define SPARK_CHAT_MAX_CHAT_HISTORY 20
+#define SPARK_CHAT_MAX_CHAT_HISTORY 8
 #endif
 
 #ifndef SPARK_CHAT_MAX_SINGLE_CONTENT
-#define SPARK_CHAT_MAX_SINGLE_CONTENT 1024
+#define SPARK_CHAT_MAX_SINGLE_CONTENT 2048
 #endif
 
 #ifndef SPARK_CHAT_MAX_TOTAL_CONTENT
@@ -25,7 +25,7 @@ extern "C" {
 #endif
 
 #ifndef SPARK_CHAT_MAX_REQUEST_JSON
-#define SPARK_CHAT_MAX_REQUEST_JSON 8192
+#define SPARK_CHAT_MAX_REQUEST_JSON 12288
 #endif
 
 typedef void (*spark_chat_stream_cb_t)(const char *text, void *user_ctx);
@@ -56,8 +56,8 @@ typedef struct {
     char content[SPARK_CHAT_MAX_SINGLE_CONTENT];
 } spark_chat_message_t;
 
-// SSE 数据缓冲区大小
-#define SPARK_CHAT_SSE_BUFFER_SIZE 2048
+// SSE 数据缓冲区大小（非流式响应可能很大，需要足够空间）
+#define SPARK_CHAT_SSE_BUFFER_SIZE 8192
 
 // 前向声明 HTTP 客户端句柄类型
 typedef struct esp_http_client *esp_http_client_handle_t;
@@ -79,6 +79,11 @@ typedef struct {
     // 持久 HTTP 连接
     esp_http_client_handle_t http_client;
     bool connection_active;
+
+    // 最近一次请求状态（用于上层判定是否应该重试）
+    int last_http_status;
+    bool last_error_is_permanent;
+    bool last_error_is_overdue_balance;
 } spark_chat_client_t;
 
 void spark_chat_init(spark_chat_client_t *client, const spark_chat_config_t *cfg);
@@ -92,6 +97,10 @@ void spark_chat_clear_history(spark_chat_client_t *client);
 bool spark_chat_request(spark_chat_client_t *client);
 
 const char *spark_chat_get_last_response(const spark_chat_client_t *client);
+
+int spark_chat_get_last_http_status(const spark_chat_client_t *client);
+bool spark_chat_last_error_is_permanent(const spark_chat_client_t *client);
+bool spark_chat_last_error_is_overdue_balance(const spark_chat_client_t *client);
 
 /**
  * @brief 关闭持久连接

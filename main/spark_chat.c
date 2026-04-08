@@ -57,8 +57,19 @@ static void safe_strcpy(char *dst, size_t dst_len, const char *src) {
         dst[0] = '\0';
         return;
     }
-    strncpy(dst, src, dst_len - 1);
-    dst[dst_len - 1] = '\0';
+    size_t src_len = strlen(src);
+    if (src_len < dst_len) {
+        /* 完整复制 */
+        memcpy(dst, src, src_len + 1);
+    } else {
+        /* 需要截断，回退到 UTF-8 字符边界避免乱码 */
+        size_t cut = dst_len - 1;
+        while (cut > 0 && (src[cut] & 0xC0) == 0x80) {
+            cut--;  /* 跳过 UTF-8 continuation bytes (10xxxxxx) */
+        }
+        memcpy(dst, src, cut);
+        dst[cut] = '\0';
+    }
 }
 
 static uint32_t history_total_len(const spark_chat_client_t *client) {
@@ -91,11 +102,15 @@ void spark_chat_init(spark_chat_client_t *client, const spark_chat_config_t *cfg
         client->cfg.timeout_ms = 30000;
     }
 
-    client->cfg.stream = true;
+    /* 保留调用者设置的 stream 值，不再强制覆盖 */
+    // client->cfg.stream = true;  // 已移除，允许非流式请求
 
     client->is_first_content = true;
     client->http_client = NULL;
     client->connection_active = false;
+    client->last_http_status = 0;
+    client->last_error_is_permanent = false;
+    client->last_error_is_overdue_balance = false;
 
     char host[96];
     get_url_host(client->cfg.url, host, sizeof(host));
@@ -277,6 +292,18 @@ static void stream_content(spark_chat_client_t *client, const char *text) {
     strncat(client->full_response, text, SPARK_CHAT_MAX_FULL_RESPONSE - strlen(client->full_response) - 1);
 }
 
+static void mark_error_flags_by_message(spark_chat_client_t *client, const char *msg)
+{
+    if (!client || !msg) {
+        return;
+    }
+
+    if (strstr(msg, "overdue balance") != NULL || strstr(msg, "欠费") != NULL) {
+        client->last_error_is_overdue_balance = true;
+        client->last_error_is_permanent = true;
+    }
+}
+
 /**
  * @brief 处理单个 SSE 数据行
  */
@@ -310,7 +337,7 @@ static void process_sse_line(spark_chat_client_t *client, const char *line) {
     
     cJSON *root = cJSON_Parse(json_start);
     if (root == NULL) {
-        // JSON 解析失败，可能是不完整的数据
+        // JSON 解析失败，静默处理
         return;
     }
 
@@ -319,6 +346,7 @@ static void process_sse_line(spark_chat_client_t *client, const char *line) {
     if (error != NULL && cJSON_IsObject(error)) {
         cJSON *message = cJSON_GetObjectItem(error, "message");
         const char *msg = (message && cJSON_IsString(message)) ? message->valuestring : "未知错误";
+        mark_error_flags_by_message(client, msg);
         ESP_LOGE(TAG, "API错误: %s", msg);
         cJSON_Delete(root);
         return;
@@ -350,6 +378,7 @@ static void process_sse_line(spark_chat_client_t *client, const char *line) {
     if (code != NULL && cJSON_IsNumber(code) && code->valueint != 0) {
         cJSON *message = cJSON_GetObjectItem(root, "message");
         const char *msg = (message && cJSON_IsString(message)) ? message->valuestring : "未知错误";
+        mark_error_flags_by_message(client, msg);
         ESP_LOGE(TAG, "API错误 code=%d: %s", code->valueint, msg);
         cJSON_Delete(root);
         return;
@@ -357,23 +386,30 @@ static void process_sse_line(spark_chat_client_t *client, const char *line) {
     
     cJSON *choices = cJSON_GetObjectItem(root, "choices");
     if (choices == NULL || !cJSON_IsArray(choices) || cJSON_GetArraySize(choices) == 0) {
+        ESP_LOGW(TAG, "响应中没有 choices 数组");
         cJSON_Delete(root);
         return;
     }
     
     cJSON *first_choice = cJSON_GetArrayItem(choices, 0);
+    
+    // 流式响应使用 "delta"，非流式响应使用 "message"
     cJSON *delta = cJSON_GetObjectItem(first_choice, "delta");
-    if (delta == NULL) {
+    cJSON *message = cJSON_GetObjectItem(first_choice, "message");
+    cJSON *msg_obj = delta ? delta : message;
+    
+    if (msg_obj == NULL) {
+        ESP_LOGW(TAG, "响应中没有 delta 或 message 对象");
         cJSON_Delete(root);
         return;
     }
     
-    cJSON *reasoning = cJSON_GetObjectItem(delta, "reasoning_content");
+    cJSON *reasoning = cJSON_GetObjectItem(msg_obj, "reasoning_content");
     if (reasoning != NULL && cJSON_IsString(reasoning) && reasoning->valuestring != NULL) {
         stream_reasoning(client, reasoning->valuestring);
     }
     
-    cJSON *content = cJSON_GetObjectItem(delta, "content");
+    cJSON *content = cJSON_GetObjectItem(msg_obj, "content");
     if (content != NULL && cJSON_IsString(content) && content->valuestring != NULL) {
         stream_content(client, content->valuestring);
     }
@@ -403,38 +439,41 @@ static esp_err_t spark_http_event_handler(esp_http_client_event_t *evt) {
                 client->sse_buffer[client->sse_buffer_len] = '\0';
             }
             
-            // 按行处理 SSE 数据（每行以 \n\n 或 \n 结束）
-            char *line_start = client->sse_buffer;
-            char *newline;
-            
-            while ((newline = strstr(line_start, "\n")) != NULL) {
-                // 找到一行完整数据
-                *newline = '\0';
+            if (client->cfg.stream) {
+                // 流式模式：按行处理 SSE 数据（每行以 \n 结束）
+                char *line_start = client->sse_buffer;
+                char *newline;
                 
-                // 处理这一行
-                if (strlen(line_start) > 0) {
-                    process_sse_line(client, line_start);
+                while ((newline = strstr(line_start, "\n")) != NULL) {
+                    // 找到一行完整数据
+                    *newline = '\0';
+                    
+                    // 处理这一行
+                    if (strlen(line_start) > 0) {
+                        process_sse_line(client, line_start);
+                    }
+                    
+                    // 移动到下一行
+                    line_start = newline + 1;
+                    // 跳过可能的额外换行符
+                    while (*line_start == '\n' || *line_start == '\r') {
+                        line_start++;
+                    }
                 }
                 
-                // 移动到下一行
-                line_start = newline + 1;
-                // 跳过可能的额外换行符
-                while (*line_start == '\n' || *line_start == '\r') {
-                    line_start++;
+                // 将未处理的数据移到缓冲区开头
+                if (line_start != client->sse_buffer) {
+                    size_t remaining = strlen(line_start);
+                    if (remaining > 0) {
+                        memmove(client->sse_buffer, line_start, remaining + 1);
+                        client->sse_buffer_len = remaining;
+                    } else {
+                        client->sse_buffer[0] = '\0';
+                        client->sse_buffer_len = 0;
+                    }
                 }
             }
-            
-            // 将未处理的数据移到缓冲区开头
-            if (line_start != client->sse_buffer) {
-                size_t remaining = strlen(line_start);
-                if (remaining > 0) {
-                    memmove(client->sse_buffer, line_start, remaining + 1);
-                    client->sse_buffer_len = remaining;
-                } else {
-                    client->sse_buffer[0] = '\0';
-                    client->sse_buffer_len = 0;
-                }
-            }
+            // 非流式模式：数据累积在 sse_buffer 中，在 HTTP_EVENT_ON_FINISH 时处理
             break;
         }
 
@@ -451,9 +490,18 @@ static esp_err_t spark_http_event_handler(esp_http_client_event_t *evt) {
             }
             break;
 
+        case HTTP_EVENT_ON_FINISH:
+            // 非流式响应：请求完成时解析累积的数据
+            if (client != NULL && !client->cfg.stream && client->sse_buffer_len > 0) {
+                process_sse_line(client, client->sse_buffer);
+                client->sse_buffer[0] = '\0';
+                client->sse_buffer_len = 0;
+            }
+            break;
+
         case HTTP_EVENT_DISCONNECTED:
 
-            // 处理缓冲区中剩余的数据
+            // 处理缓冲区中剩余的数据（流式模式可能有残留）
             if (client != NULL && client->sse_buffer_len > 0) {
                 process_sse_line(client, client->sse_buffer);
                 client->sse_buffer[0] = '\0';
@@ -475,25 +523,29 @@ bool spark_chat_request(spark_chat_client_t *client) {
 
     memset(client->full_response, 0, sizeof(client->full_response));
     client->is_first_content = true;
+    client->last_http_status = 0;
+    client->last_error_is_permanent = false;
+    client->last_error_is_overdue_balance = false;
 
-    char request_json[SPARK_CHAT_MAX_REQUEST_JSON] = {0};
-    if (!build_request_json(client, request_json, sizeof(request_json))) {
-        ESP_LOGE(TAG, "构建请求JSON失败");
-        return false;
+    bool ok = false;
+    char *request_json = calloc(1, SPARK_CHAT_MAX_REQUEST_JSON);
+    if (request_json == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate request JSON buffer");
+        goto cleanup;
     }
 
-    char host[96];
-    get_url_host(client->cfg.url, host, sizeof(host));
-    ESP_LOGI(TAG, "请求AI: platform=%s, host=%s, model=%s, payload=%d bytes",
-        detect_ai_platform(client->cfg.url),
-        host[0] != '\0' ? host : "(none)",
-        client->cfg.model != NULL ? client->cfg.model : "(none)",
-        (int)strlen(request_json));
+    if (!build_request_json(client, request_json, SPARK_CHAT_MAX_REQUEST_JSON)) {
+        ESP_LOGE(TAG, "构建请求JSON失败");
+        goto cleanup;
+    }
+
+    // 静默处理请求，不输出详细日志
 
     // 如果没有活跃连接，创建新的 HTTP 客户端
     if (client->http_client == NULL) {
         uint32_t timeout = client->cfg.timeout_ms;
-        if (timeout > 15000) timeout = 15000;  // 限制超时时间
+        if (timeout > 30000) timeout = 30000;  // 限制超时时间最大30秒
+        if (timeout < 8000) timeout = 8000;    // 最小8秒
         
         esp_http_client_config_t config = {
             .url = client->cfg.url,
@@ -516,7 +568,7 @@ bool spark_chat_request(spark_chat_client_t *client) {
         client->http_client = esp_http_client_init(&config);
         if (client->http_client == NULL) {
             ESP_LOGE(TAG, "初始化HTTP客户端失败");
-            return false;
+            goto cleanup;
         }
         
     }
@@ -533,7 +585,8 @@ bool spark_chat_request(spark_chat_client_t *client) {
     
     esp_http_client_set_header(client->http_client, "Authorization", auth_header);
     esp_http_client_set_header(client->http_client, "Content-Type", "application/json");
-    esp_http_client_set_header(client->http_client, "Accept", "text/event-stream");
+    esp_http_client_set_header(client->http_client, "Accept",
+                               client->cfg.stream ? "text/event-stream" : "application/json");
     esp_http_client_set_header(client->http_client, "Connection", "close");
     esp_http_client_set_post_field(client->http_client, request_json, (int)strlen(request_json));
 
@@ -545,16 +598,19 @@ bool spark_chat_request(spark_chat_client_t *client) {
         esp_http_client_cleanup(client->http_client);
         client->http_client = NULL;
         client->connection_active = false;
-        return false;
+        goto cleanup;
     }
 
     int http_code = esp_http_client_get_status_code(client->http_client);
+    client->last_http_status = http_code;
     
     if (http_code != 200) {
         ESP_LOGE(TAG, "HTTP响应错误，状态码: %d", http_code);
         if (http_code == 401) {
+            client->last_error_is_permanent = true;
             ESP_LOGE(TAG, "鉴权失败：请检查API Key是否正确、是否带Bearer前缀、是否调用了正确平台。");
         } else if (http_code == 403) {
+            client->last_error_is_permanent = true;
             ESP_LOGE(TAG, "权限/计费失败：当前平台=%s，常见原因是账号欠费、模型未开通或Key无权限。",
                 detect_ai_platform(client->cfg.url));
         }
@@ -562,12 +618,16 @@ bool spark_chat_request(spark_chat_client_t *client) {
         esp_http_client_cleanup(client->http_client);
         client->http_client = NULL;
         client->connection_active = false;
-        return false;
+        goto cleanup;
     }
 
     client->connection_active = true;
     printf("\n");
-    return true;
+    ok = true;
+
+cleanup:
+    free(request_json);
+    return ok;
 }
 
 void spark_chat_close_connection(spark_chat_client_t *client) {
@@ -587,4 +647,28 @@ const char *spark_chat_get_last_response(const spark_chat_client_t *client) {
         return "";
     }
     return client->full_response;
+}
+
+int spark_chat_get_last_http_status(const spark_chat_client_t *client)
+{
+    if (client == NULL) {
+        return 0;
+    }
+    return client->last_http_status;
+}
+
+bool spark_chat_last_error_is_permanent(const spark_chat_client_t *client)
+{
+    if (client == NULL) {
+        return false;
+    }
+    return client->last_error_is_permanent;
+}
+
+bool spark_chat_last_error_is_overdue_balance(const spark_chat_client_t *client)
+{
+    if (client == NULL) {
+        return false;
+    }
+    return client->last_error_is_overdue_balance;
 }

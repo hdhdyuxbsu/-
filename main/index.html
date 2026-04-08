@@ -309,7 +309,7 @@ body{
 </style>
 </head>
 <body>
-<div class="loading" id="loader">
+<div class="loading hide" id="loader">
   <div class="spinner"></div>
   <div>正在加载 OneNet 和 ESP32 数据...</div>
 </div>
@@ -464,7 +464,6 @@ body{
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <script>
 const ONENET_PRODUCT_ID = 'W9BY3SlO8w';
 const ONENET_DEVICE_NAME = 'dachuang';
@@ -474,6 +473,11 @@ const ONENET_ET = '2057492169';
 const ONENET_TIMEOUT_MS = 10000;
 const ESP32_TIMEOUT_MS = 5000;
 const LOADER_FAILSAFE_MS = 15000;
+const CHART_LOAD_TIMEOUT_MS = 5000;
+const CHART_CDN_URLS = [
+  'https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js',
+  'https://unpkg.com/chart.js@4/dist/chart.umd.min.js'
+];
 
 let cachedToken = null;
 let chart = null;
@@ -484,11 +488,73 @@ let currentMode = '';
 let manualState = { fan: 0, pump: 0, servo: 90 };
 
 const tabConfigs = [
-  { ids: ['env_temp', 'soil_temp'], labels: ['环境温度', '土壤温度'], colors: ['#f08c00', '#e03131'] },
-  { ids: ['env_humi', 'soil_humi'], labels: ['环境湿度', '土壤湿度'], colors: ['#1c7ed6', '#2f9e44'] },
-  { ids: ['lux'], labels: ['光照强度'], colors: ['#f59f00'] },
-  { ids: ['ph'], labels: ['酸碱度'], colors: ['#0b7285'] }
+  { ids: ['env_temp', 'soil_temp'], labels: ['Env Temp', 'Soil Temp'], colors: ['#f08c00', '#e03131'] },
+  { ids: ['env_humi', 'soil_humi'], labels: ['Env Humi', 'Soil Humi'], colors: ['#1c7ed6', '#2f9e44'] },
+  { ids: ['lux'], labels: ['Lux'], colors: ['#f59f00'] },
+  { ids: ['ph'], labels: ['pH'], colors: ['#0b7285'] }
 ];
+
+let chartReady = false;
+
+function loadScriptWithTimeout(url, timeoutMs){
+  return new Promise(function(resolve, reject){
+    const existed = document.querySelector('script[data-chart-src="' + url + '"]');
+    if (existed) {
+      const onLoad = function(){ resolve(); };
+      const onError = function(){ reject(new Error('script load failed')); };
+      existed.addEventListener('load', onLoad, { once: true });
+      existed.addEventListener('error', onError, { once: true });
+      setTimeout(function(){ reject(new Error('script load timeout')); }, timeoutMs);
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = url;
+    script.async = true;
+    script.setAttribute('data-chart-src', url);
+
+    const timer = setTimeout(function(){
+      reject(new Error('script load timeout'));
+    }, timeoutMs);
+
+    script.onload = function(){
+      clearTimeout(timer);
+      resolve();
+    };
+    script.onerror = function(){
+      clearTimeout(timer);
+      reject(new Error('script load failed'));
+    };
+    document.head.appendChild(script);
+  });
+}
+
+async function ensureChartReady(){
+  if (typeof window.Chart !== 'undefined') {
+    chartReady = true;
+    return true;
+  }
+
+  for (const url of CHART_CDN_URLS) {
+    try {
+      await loadScriptWithTimeout(url, CHART_LOAD_TIMEOUT_MS);
+      if (typeof window.Chart !== 'undefined') {
+        chartReady = true;
+        return true;
+      }
+    } catch (err) {
+      console.warn('Chart CDN load failed:', url, err);
+    }
+  }
+
+  chartReady = false;
+  return false;
+}
+
+setTimeout(function(){
+  const loader = document.getElementById('loader');
+  if (loader) loader.classList.add('hide');
+}, LOADER_FAILSAFE_MS);
 
 async function fetchWithTimeout(url, options, timeoutMs){
   const controller = new AbortController();
@@ -816,6 +882,10 @@ function formatLabel(ts){
 }
 
 function renderChart(){
+  if (!chartReady || typeof window.Chart === 'undefined') {
+    return;
+  }
+
   const cfg = tabConfigs[currentTab];
   const datasets = [];
   let labels = [];
@@ -932,6 +1002,7 @@ async function init(){
   loadEsp32Base();
   await refreshAll();
   try {
+    await ensureChartReady();
     await loadHistory();
   } catch (err) {
     console.error('loadHistory failed:', err);
@@ -940,6 +1011,16 @@ async function init(){
     if (loaderEl) loaderEl.classList.add('hide');
   }
 }
+
+let appBooted = false;
+function bootApp(){
+  if (appBooted) return;
+  appBooted = true;
+  init();
+  setInterval(refreshAll, 10000);
+  setInterval(loadHistory, 300000);
+}
+bootApp();
 
 /* ===== 仅追加：监控对象输入与显示增强 ===== */
 (function plantTargetEnhancement(){
@@ -1460,9 +1541,166 @@ async function init(){
   ensureResultNode();
 })();
 
-init();
-setInterval(refreshAll, 10000);
-setInterval(loadHistory, 300000);
+/* ===== only append: monitor target profile panel ===== */
+(function plantProfilePanelV4(){
+  const TXT = {
+    targetPrefix: '\u5f53\u524d\u76d1\u63a7\u5bf9\u8c61\uff1a',
+    defaultTarget: '\u6849\u6811\u82d7',
+    pending: '\u8d44\u6599\u68c0\u7d22\u4e2d',
+    ready: '\u8d44\u6599\u5df2\u5c31\u7eea',
+    fallback: '\u9ed8\u8ba4\u8d44\u6599',
+    introSummary: '\u8bbe\u5907\u4f1a\u6839\u636e\u76d1\u63a7\u5bf9\u8c61\u68c0\u7d22\u751f\u957f\u4e60\u6027\uff0c\u5e76\u7ed3\u5408\u4e0b\u4f4d\u673a\u4e0a\u4f20\u6570\u636e\u7ed9\u51fa\u5efa\u8bae\u3002',
+    introRanges: '\u9ed8\u8ba4\u5bf9\u8c61\uff1a\u6849\u6811\u82d7\u3002\u667a\u80fd\u6a21\u5f0f\u4e0b\u53ef\u81ea\u52a8\u8c03\u8282\u6c34\u6cf5\u3001\u98ce\u6247\u3001\u8865\u5149\u706f\u548c\u8235\u673a\u906e\u9633\u3002',
+    loadingSummary: '\u6b63\u5728\u68c0\u7d22\u8be5\u76d1\u63a7\u5bf9\u8c61\u7684\u751f\u957f\u4e60\u6027\u8d44\u6599...',
+    sourcePrefix: '\u8d44\u6599\u6765\u6e90\uff1a',
+    agePrefix: '\u753b\u50cf\u5e74\u9f84\uff1a',
+    seconds: ' \u79d2\u3002',
+    targetRangePrefix: '\u76ee\u6807\u533a\u95f4\uff1a',
+    rangePending: '\u76ee\u6807\u533a\u95f4\uff1a\u7b49\u5f85\u690d\u7269\u753b\u50cf\u8fd4\u56de\u540e\u663e\u793a\u3002',
+    press: '\u6c14\u538b ',
+    temp: '\u6e29\u5ea6 ',
+    airHumi: '\u7a7a\u6c14\u6e7f\u5ea6 ',
+    soilTemp: '\u571f\u58e4\u6e29\u5ea6 ',
+    soilHumi: '\u571f\u58e4\u6e7f\u5ea6 ',
+    n: 'N ',
+    p: 'P ',
+    k: 'K ',
+    lux: '\u5149\u7167 '
+  };
+
+  function ensureStyle(){
+    if (document.getElementById('plant_profile_panel_style')) return;
+    const style = document.createElement('style');
+    style.id = 'plant_profile_panel_style';
+    style.textContent = [
+      '.plant-profile-panel{margin-top:10px;padding:12px 14px;border:1px solid #dbe7ec;border-radius:14px;background:#f8fbfc;color:#23404a}',
+      '.plant-profile-head{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px;font-weight:700}',
+      '.plant-profile-status{padding:4px 8px;border-radius:999px;background:#eef2f4;color:#48616b}',
+      '.plant-profile-status.ready{background:#e6f7ea;color:#247a3d}',
+      '.plant-profile-status.pending{background:#fff4d6;color:#9c6b00}',
+      '.plant-profile-status.fallback{background:#eef5ff;color:#1c5ca8}',
+      '.plant-profile-summary{margin-top:8px;font-size:13px;line-height:1.6;color:#43606b}',
+      '.plant-profile-ranges{margin-top:8px;font-size:12px;line-height:1.7;color:#5b737d}'
+    ].join('');
+    document.head.appendChild(style);
+  }
+
+  function ensurePanel(){
+    ensureStyle();
+    let host = document.getElementById('plant_v2_box');
+    if (!host) host = document.querySelector('.hero');
+    if (!host) return null;
+
+    let panel = document.getElementById('plant_profile_panel');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'plant_profile_panel';
+      panel.className = 'plant-profile-panel';
+      panel.innerHTML =
+        '<div class="plant-profile-head">' +
+        '  <span id="plant_profile_target">' + TXT.targetPrefix + TXT.defaultTarget + '</span>' +
+        '  <span id="plant_profile_status" class="plant-profile-status pending">' + TXT.pending + '</span>' +
+        '</div>' +
+        '<div id="plant_profile_summary" class="plant-profile-summary">' + TXT.introSummary + '</div>' +
+        '<div id="plant_profile_ranges" class="plant-profile-ranges">' + TXT.introRanges + '</div>';
+      host.appendChild(panel);
+    }
+    return panel;
+  }
+
+  function setTextSafe(id, text){
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
+  }
+
+  function setStatus(text, state){
+    const el = document.getElementById('plant_profile_status');
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'plant-profile-status ' + state;
+  }
+
+  function num(v){
+    return typeof v === 'number' && isFinite(v) ? v : null;
+  }
+
+  function updatePanel(data){
+    ensurePanel();
+    const target =
+      data && typeof data.monitor_target === 'string' && data.monitor_target.trim() ? data.monitor_target.trim() :
+      data && typeof data.plant === 'string' && data.plant.trim() ? data.plant.trim() :
+      TXT.defaultTarget;
+
+    setTextSafe('plant_profile_target', TXT.targetPrefix + target);
+
+    const ready = !!(data && data.profile_ready && data.profile_matches_current);
+    const source = data && typeof data.profile_source === 'string' && data.profile_source.trim()
+      ? data.profile_source.trim()
+      : 'pending';
+    const summary = data && typeof data.profile_summary === 'string' && data.profile_summary.trim()
+      ? data.profile_summary.trim()
+      : TXT.loadingSummary;
+
+    if (ready) {
+      setStatus(source === 'default' ? TXT.fallback : TXT.ready, source === 'default' ? 'fallback' : 'ready');
+    } else {
+      setStatus(TXT.pending, 'pending');
+    }
+
+    const ageS = data && typeof data.profile_age_s === 'number' ? data.profile_age_s : 0;
+    const summaryText = ready
+      ? (TXT.sourcePrefix + source + '\uff0c' + TXT.agePrefix + ageS + TXT.seconds + summary)
+      : (TXT.sourcePrefix + source + '\u3002' + summary);
+    setTextSafe('plant_profile_summary', summaryText);
+
+    const ranges = [];
+    const tMin = num(data && data.profile_temp_min);
+    const tMax = num(data && data.profile_temp_max);
+    const hMin = num(data && data.profile_air_humi_min);
+    const hMax = num(data && data.profile_air_humi_max);
+    const psMin = num(data && data.profile_press_min);
+    const psMax = num(data && data.profile_press_max);
+    const stMin = num(data && data.profile_soil_temp_min);
+    const stMax = num(data && data.profile_soil_temp_max);
+    const sMin = num(data && data.profile_soil_humi_min);
+    const sMax = num(data && data.profile_soil_humi_max);
+    const pMin = num(data && data.profile_ph_min);
+    const pMax = num(data && data.profile_ph_max);
+    const nMin = num(data && data.profile_n_min);
+    const nMax = num(data && data.profile_n_max);
+    const ppMin = num(data && data.profile_p_min);
+    const ppMax = num(data && data.profile_p_max);
+    const kMin = num(data && data.profile_k_min);
+    const kMax = num(data && data.profile_k_max);
+    const lMin = num(data && data.profile_lux_min);
+    const lMax = num(data && data.profile_lux_max);
+
+    if (psMin !== null && psMax !== null) ranges.push(TXT.press + psMin.toFixed(1) + '-' + psMax.toFixed(1) + ' kPa');
+    if (tMin !== null && tMax !== null) ranges.push(TXT.temp + tMin.toFixed(1) + '-' + tMax.toFixed(1) + '\u2103');
+    if (hMin !== null && hMax !== null) ranges.push(TXT.airHumi + hMin.toFixed(0) + '-' + hMax.toFixed(0) + '%');
+    if (stMin !== null && stMax !== null) ranges.push(TXT.soilTemp + stMin.toFixed(1) + '-' + stMax.toFixed(1) + '\u2103');
+    if (sMin !== null && sMax !== null) ranges.push(TXT.soilHumi + sMin.toFixed(0) + '-' + sMax.toFixed(0) + '%');
+    if (pMin !== null && pMax !== null) ranges.push('pH ' + pMin.toFixed(1) + '-' + pMax.toFixed(1));
+    if (nMin !== null && nMax !== null) ranges.push(TXT.n + nMin.toFixed(1) + '-' + nMax.toFixed(1));
+    if (ppMin !== null && ppMax !== null) ranges.push(TXT.p + ppMin.toFixed(1) + '-' + ppMax.toFixed(1));
+    if (kMin !== null && kMax !== null) ranges.push(TXT.k + kMin.toFixed(1) + '-' + kMax.toFixed(1));
+    if (lMin !== null && lMax !== null) ranges.push(TXT.lux + lMin.toFixed(0) + '-' + lMax.toFixed(0) + ' lux');
+
+    setTextSafe(
+      'plant_profile_ranges',
+      ranges.length ? (TXT.targetRangePrefix + ranges.join(' | ')) : TXT.rangePending
+    );
+  }
+
+  const oldUpdateDashboardPlantProfileV4 = updateDashboard;
+  updateDashboard = function(resp, esp32Data){
+    oldUpdateDashboardPlantProfileV4(resp, esp32Data);
+    updatePanel(esp32Data || {});
+  };
+
+  ensurePanel();
+  updatePanel({});
+})();
 </script>
 </body>
 </html>

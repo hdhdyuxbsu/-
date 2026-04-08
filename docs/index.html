@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>智慧农业监测平台</title>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;800&display=swap');
+/* 使用系统字体，避免 Google Fonts 在国内加载慢 */
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:#fff;
@@ -309,7 +309,7 @@ body{
 </style>
 </head>
 <body>
-<div class="loading" id="loader">
+<div class="loading hide" id="loader">
   <div class="spinner"></div>
   <div>正在加载 OneNet 和 ESP32 数据...</div>
 </div>
@@ -464,7 +464,6 @@ body{
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <script>
 const ONENET_PRODUCT_ID = 'W9BY3SlO8w';
 const ONENET_DEVICE_NAME = 'dachuang';
@@ -474,6 +473,11 @@ const ONENET_ET = '2057492169';
 const ONENET_TIMEOUT_MS = 10000;
 const ESP32_TIMEOUT_MS = 5000;
 const LOADER_FAILSAFE_MS = 15000;
+const CHART_LOAD_TIMEOUT_MS = 5000;
+const CHART_CDN_URLS = [
+  'https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js',
+  'https://unpkg.com/chart.js@4/dist/chart.umd.min.js'
+];
 
 let cachedToken = null;
 let chart = null;
@@ -484,11 +488,73 @@ let currentMode = '';
 let manualState = { fan: 0, pump: 0, servo: 90 };
 
 const tabConfigs = [
-  { ids: ['env_temp', 'soil_temp'], labels: ['环境温度', '土壤温度'], colors: ['#f08c00', '#e03131'] },
-  { ids: ['env_humi', 'soil_humi'], labels: ['环境湿度', '土壤湿度'], colors: ['#1c7ed6', '#2f9e44'] },
-  { ids: ['lux'], labels: ['光照强度'], colors: ['#f59f00'] },
-  { ids: ['ph'], labels: ['酸碱度'], colors: ['#0b7285'] }
+  { ids: ['env_temp', 'soil_temp'], labels: ['Env Temp', 'Soil Temp'], colors: ['#f08c00', '#e03131'] },
+  { ids: ['env_humi', 'soil_humi'], labels: ['Env Humi', 'Soil Humi'], colors: ['#1c7ed6', '#2f9e44'] },
+  { ids: ['lux'], labels: ['Lux'], colors: ['#f59f00'] },
+  { ids: ['ph'], labels: ['pH'], colors: ['#0b7285'] }
 ];
+
+let chartReady = false;
+
+function loadScriptWithTimeout(url, timeoutMs){
+  return new Promise(function(resolve, reject){
+    const existed = document.querySelector('script[data-chart-src="' + url + '"]');
+    if (existed) {
+      const onLoad = function(){ resolve(); };
+      const onError = function(){ reject(new Error('script load failed')); };
+      existed.addEventListener('load', onLoad, { once: true });
+      existed.addEventListener('error', onError, { once: true });
+      setTimeout(function(){ reject(new Error('script load timeout')); }, timeoutMs);
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = url;
+    script.async = true;
+    script.setAttribute('data-chart-src', url);
+
+    const timer = setTimeout(function(){
+      reject(new Error('script load timeout'));
+    }, timeoutMs);
+
+    script.onload = function(){
+      clearTimeout(timer);
+      resolve();
+    };
+    script.onerror = function(){
+      clearTimeout(timer);
+      reject(new Error('script load failed'));
+    };
+    document.head.appendChild(script);
+  });
+}
+
+async function ensureChartReady(){
+  if (typeof window.Chart !== 'undefined') {
+    chartReady = true;
+    return true;
+  }
+
+  for (const url of CHART_CDN_URLS) {
+    try {
+      await loadScriptWithTimeout(url, CHART_LOAD_TIMEOUT_MS);
+      if (typeof window.Chart !== 'undefined') {
+        chartReady = true;
+        return true;
+      }
+    } catch (err) {
+      console.warn('Chart CDN load failed:', url, err);
+    }
+  }
+
+  chartReady = false;
+  return false;
+}
+
+setTimeout(function(){
+  const loader = document.getElementById('loader');
+  if (loader) loader.classList.add('hide');
+}, LOADER_FAILSAFE_MS);
 
 async function fetchWithTimeout(url, options, timeoutMs){
   const controller = new AbortController();
@@ -816,6 +882,10 @@ function formatLabel(ts){
 }
 
 function renderChart(){
+  if (!chartReady || typeof window.Chart === 'undefined') {
+    return;
+  }
+
   const cfg = tabConfigs[currentTab];
   const datasets = [];
   let labels = [];
@@ -932,6 +1002,7 @@ async function init(){
   loadEsp32Base();
   await refreshAll();
   try {
+    await ensureChartReady();
     await loadHistory();
   } catch (err) {
     console.error('loadHistory failed:', err);
@@ -940,6 +1011,16 @@ async function init(){
     if (loaderEl) loaderEl.classList.add('hide');
   }
 }
+
+let appBooted = false;
+function bootApp(){
+  if (appBooted) return;
+  appBooted = true;
+  init();
+  setInterval(refreshAll, 10000);
+  setInterval(loadHistory, 300000);
+}
+bootApp();
 
 /* ===== 仅追加：监控对象输入与显示增强 ===== */
 (function plantTargetEnhancement(){
@@ -1459,10 +1540,6 @@ async function init(){
 
   ensureResultNode();
 })();
-
-init();
-setInterval(refreshAll, 10000);
-setInterval(loadHistory, 300000);
 </script>
 </body>
 </html>

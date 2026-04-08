@@ -1,4 +1,4 @@
-idf_component_register(SRCS "doubao_chat.c" "st7735_display.c" "main.c"
+idf_component_register(SRCS "spark_chat.c" "st7735_display.c" "main.c"
                             "baidu_tts.c"
                             "max98357a.c"
                     INCLUDE_DIRS "."
